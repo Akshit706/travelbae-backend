@@ -14,7 +14,7 @@ router.use(authenticate);
 
 // Gemini API endpoint
 function geminiUrl() {
-  return `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+  return `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
 }
 
 // Internal helper: call Gemini
