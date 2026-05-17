@@ -27,6 +27,7 @@ model Trip {
   destination String
   emoji       String   @default("✈️")
   arrival     DateTime
+  completed   Boolean  @default(false)
   departure   DateTime
   isSolo      Boolean  @default(false)
   shareCode   String   @unique
