@@ -195,7 +195,10 @@ router.patch('/:id', async (req, res) => {
 
     const trip = await db.trip.update({
       where: { id: req.params.id },
-      data: { completed: req.body.completed },
+      data: {
+        ...(req.body.completed !== undefined && { completed: req.body.completed }),
+        ...(req.body.budget !== undefined && { budget: req.body.budget }),
+      },
     });
     res.json({ trip });
   } catch (err) {
