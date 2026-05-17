@@ -165,4 +165,43 @@ router.post('/join', async (req, res) => {
   }
 });
 
+// ── DELETE TRIP ─────────────────────────────────────────
+router.delete('/:id', async (req, res) => {
+  try {
+    const membership = await db.tripMember.findFirst({
+      where: { tripId: req.params.id, userId: req.userId },
+    });
+    if (!membership) {
+      return res.status(403).json({ error: 'You are not a member of this trip.' });
+    }
+
+    await db.trip.delete({ where: { id: req.params.id } });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Delete trip error:', err);
+    res.status(500).json({ error: 'Could not delete trip.' });
+  }
+});
+
+// ── UPDATE TRIP (mark complete / restore) ───────────────
+router.patch('/:id', async (req, res) => {
+  try {
+    const membership = await db.tripMember.findFirst({
+      where: { tripId: req.params.id, userId: req.userId },
+    });
+    if (!membership) {
+      return res.status(403).json({ error: 'You are not a member of this trip.' });
+    }
+
+    const trip = await db.trip.update({
+      where: { id: req.params.id },
+      data: { completed: req.body.completed },
+    });
+    res.json({ trip });
+  } catch (err) {
+    console.error('Update trip error:', err);
+    res.status(500).json({ error: 'Could not update trip.' });
+  }
+});
+
 module.exports = router;
