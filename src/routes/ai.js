@@ -142,7 +142,7 @@ const router = express.Router();
 router.use(authenticate);
 
 // ── Gemini URLs ─────────────────────────────────────────
-function geminiUrl(model = 'gemini-2.5-flash') {
+function geminiUrl(model = 'gemini-3.1-flash-lite') {
   return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`;
 }
 
@@ -180,7 +180,7 @@ async function callGemini({ system, messages, maxTokens = 1000, temperature = 0.
 // Uses real-time web search to pull data from TripAdvisor,
 // Lonely Planet, Google Travel, Nomadic Matt, WikiVoyage etc.
 async function callGeminiWithSearch({ prompt, maxTokens = 8000, temperature = 0.3 }) {
-  const res = await fetch(geminiUrl('gemini-2.5-flash'), {
+  const res = await fetch(geminiUrl('gemini-3.1-flash-lite'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
