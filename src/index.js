@@ -14,6 +14,7 @@ const photoRoutes     = require('./routes/photos');
 const itineraryRoutes = require('./routes/itinerary');
 const aiRoutes        = require('./routes/ai');
 
+
 const app = express();
 
 // Allow your React frontend to call this server
@@ -48,3 +49,5 @@ const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`✅ Server running at http://localhost:${PORT}`);
 });
+
+app.use('/ai', require('./routes/ai'));
