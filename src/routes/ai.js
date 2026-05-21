@@ -220,7 +220,7 @@ router.post('/chat', async (req, res) => {
 // ── ITINERARY ────────────────────────────────────────────
 // Body: { destination, days, budget, people, interests }
 router.post('/itinerary', async (req, res) => {
-  const { destination, days, budget, people = 1, interests = [] } = req.body;
+  const { destination, days, budget, people = 1, interests = [], customDescription } = req.body;
 
   if (!destination || !days) {
     return res.status(400).json({ error: 'destination and days are required.' });
@@ -294,6 +294,7 @@ TRIP DETAILS:
 - People: ${people}
 - Budget: ${budget ? `₹${budget} total (₹${budgetPerDay}/day per group)` : 'flexible'}
 - Interests: ${interestStr}
+${customDescription ? `- Special instructions from traveler (HIGHEST PRIORITY — follow these closely): "${customDescription}"` : ''}
 
 ITINERARY RULES:
 1. Order activities logically by geography — cluster nearby spots on the same day to minimise travel
