@@ -416,9 +416,12 @@ router.get('/photos', async (req, res) => {
   const { q } = req.query;
   if (!q) return res.status(400).json({ error: 'q is required' });
   try {
+    console.log('Auth passed, fetching for query:', q);
     const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(q)}&gsrnamespace=6&gsrlimit=3&prop=imageinfo&iiprop=url|size&iiurlwidth=600&format=json&origin=*`;
     const r = await fetch(searchUrl);
-    const data = await r.json();
+    const text = await r.text();
+    console.log('Wikimedia raw response:', text.slice(0, 200));
+    const data = JSON.parse(text);
     const pages = data.query?.pages || {};
     const urls = Object.values(pages)
       .filter(p => p.imageinfo?.[0]?.url)
