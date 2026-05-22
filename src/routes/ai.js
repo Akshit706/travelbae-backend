@@ -417,9 +417,12 @@ router.get('/photos', async (req, res) => {
   if (!q) return res.status(400).json({ error: 'q is required' });
   try {
     const url = `https://www.googleapis.com/customsearch/v1?key=${process.env.GOOGLE_CSE_API_KEY}&cx=${process.env.GOOGLE_CSE_CX}&q=${encodeURIComponent(q)}&searchType=image&num=3&imgSize=large&imgType=photo&safe=active`;
+    console.log('Fetching:', url);
     const r = await fetch(url);
     const data = await r.json();
+    console.log('Full CSE response:', JSON.stringify(data, null, 2));
     const urls = (data.items || []).map(item => item.link);
+    console.log('URLs found:', urls);
     res.json({ urls });
   } catch (err) {
     console.error('CSE photos error:', err.message);
