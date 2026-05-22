@@ -416,15 +416,13 @@ router.get('/photos', async (req, res) => {
   const { q } = req.query;
   if (!q) return res.status(400).json({ error: 'q is required' });
   try {
-    const r = await fetch(
-      `https://api.pexels.com/v1/search?query=${encodeURIComponent(q)}&per_page=4&orientation=landscape`,
-      { headers: { Authorization: process.env.PEXELS_API_KEY } }
-    );
+    const url = `https://www.googleapis.com/customsearch/v1?key=${process.env.GOOGLE_CSE_API_KEY}&cx=${process.env.GOOGLE_CSE_CX}&q=${encodeURIComponent(q)}&searchType=image&num=3&imgSize=large&imgType=photo&safe=active`;
+    const r = await fetch(url);
     const data = await r.json();
-    const urls = (data.photos || []).map(p => p.src.medium);
+    const urls = (data.items || []).map(item => item.link);
     res.json({ urls });
   } catch (err) {
-    console.error('Pexels error:', err.message);
+    console.error('CSE photos error:', err.message);
     res.status(500).json({ error: 'Could not fetch photos' });
   }
 });
