@@ -412,25 +412,36 @@ Return ONLY valid JSON:
 });
 
 
+const photoCache = new Map();
+
 router.get('/photos', async (req, res) => {
   const { q } = req.query;
   if (!q) return res.status(400).json({ error: 'q is required' });
+
+  if (photoCache.has(q)) {
+    return res.json({ urls: photoCache.get(q) });
+  }
+
   try {
-    console.log('Auth passed, fetching for query:', q);
     const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(q)}&gsrnamespace=6&gsrlimit=3&prop=imageinfo&iiprop=url|size&iiurlwidth=600&format=json&origin=*`;
-    const r = await fetch(searchUrl);
+    const r = await fetch(searchUrl, {
+      headers: { 'User-Agent': 'TravelBae/1.0 (contact@travelbae.app)' }
+    });
     const text = await r.text();
-    console.log('Wikimedia raw response:', text.slice(0, 200));
+    if (text.startsWith('You are making')) {
+      return res.json({ urls: [] });
+    }
     const data = JSON.parse(text);
     const pages = data.query?.pages || {};
     const urls = Object.values(pages)
       .filter(p => p.imageinfo?.[0]?.url)
-      .filter(p => {
-        const url = p.imageinfo[0].url.toLowerCase();
-        return url.match(/\.(jpg|jpeg|png|webp)$/);
-      })
+      .filter(p => p.imageinfo[0].url.toLowerCase().match(/\.(jpg|jpeg|png|webp)$/))
       .map(p => p.imageinfo[0].thumburl || p.imageinfo[0].url)
       .slice(0, 3);
+
+    photoCache.set(q, urls);
+    setTimeout(() => photoCache.delete(q), 60 * 60 * 1000);
+
     res.json({ urls });
   } catch (err) {
     console.error('Wikimedia photos error:', err.message);
