@@ -411,4 +411,24 @@ Return ONLY valid JSON:
   }
 });
 
+
+router.get('/photos', async (req, res) => {
+  const { q } = req.query;
+  if (!q) return res.status(400).json({ error: 'q is required' });
+  try {
+    const r = await fetch(
+      `https://api.pexels.com/v1/search?query=${encodeURIComponent(q)}&per_page=4&orientation=landscape`,
+      { headers: { Authorization: process.env.PEXELS_API_KEY } }
+    );
+    const data = await r.json();
+    const urls = (data.photos || []).map(p => p.src.medium);
+    res.json({ urls });
+  } catch (err) {
+    console.error('Pexels error:', err.message);
+    res.status(500).json({ error: 'Could not fetch photos' });
+  }
+});
+
+
+
 module.exports = router;
