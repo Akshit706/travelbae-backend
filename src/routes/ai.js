@@ -416,16 +416,21 @@ router.get('/photos', async (req, res) => {
   const { q } = req.query;
   if (!q) return res.status(400).json({ error: 'q is required' });
   try {
-    const url = `https://www.googleapis.com/customsearch/v1?key=${process.env.GOOGLE_CSE_API_KEY}&cx=${process.env.GOOGLE_CSE_CX}&q=${encodeURIComponent(q)}&searchType=image&num=3&imgSize=large&imgType=photo&safe=active`;
-    console.log('Fetching:', url);
-    const r = await fetch(url);
+    const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(q)}&gsrnamespace=6&gsrlimit=3&prop=imageinfo&iiprop=url|size&iiurlwidth=600&format=json&origin=*`;
+    const r = await fetch(searchUrl);
     const data = await r.json();
-    console.log('Full CSE response:', JSON.stringify(data, null, 2));
-    const urls = (data.items || []).map(item => item.link);
-    console.log('URLs found:', urls);
+    const pages = data.query?.pages || {};
+    const urls = Object.values(pages)
+      .filter(p => p.imageinfo?.[0]?.url)
+      .filter(p => {
+        const url = p.imageinfo[0].url.toLowerCase();
+        return url.match(/\.(jpg|jpeg|png|webp)$/);
+      })
+      .map(p => p.imageinfo[0].thumburl || p.imageinfo[0].url)
+      .slice(0, 3);
     res.json({ urls });
   } catch (err) {
-    console.error('CSE photos error:', err.message);
+    console.error('Wikimedia photos error:', err.message);
     res.status(500).json({ error: 'Could not fetch photos' });
   }
 });
