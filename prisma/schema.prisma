@@ -19,6 +19,8 @@ model User {
 
   // A user can be a member of many trips
   memberships TripMember[]
+  clubProfiles ClubProfile[]   @relation("ClubProfileCreator")
+  clubRequests ClubJoinRequest[] @relation("ClubRequestSenderUser")
 }
 
 model Trip {
@@ -41,6 +43,9 @@ model Trip {
   contacts    Contact[]
   photos      Photo[]
   itinerary   ItineraryItem[]
+  clubProfile ClubProfile?
+  clubRequestsSent ClubJoinRequest[]     @relation("ClubRequestSenderTrip")
+  clubRequestsReceived ClubJoinRequest[] @relation("ClubRequestTargetTrip")
 }
 
 // Join table: which users belong to which trip
@@ -105,4 +110,40 @@ model ItineraryItem {
   icon      String?
 
   trip      Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+}
+
+model ClubProfile {
+  id          String   @id @default(cuid())
+  tripId       String   @unique
+  creatorUserId String
+  status      String   @default("listed") // listed | snooze
+  title       String
+  about       String
+  lookingFor  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  trip        Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  creator     User     @relation("ClubProfileCreator", fields: [creatorUserId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+}
+
+model ClubJoinRequest {
+  id              String   @id @default(cuid())
+  targetTripId    String
+  requesterTripId String
+  requesterUserId String
+  message         String
+  status          String   @default("pending") // pending | accepted | declined
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  targetTrip      Trip     @relation("ClubRequestTargetTrip", fields: [targetTripId], references: [id], onDelete: Cascade)
+  requesterTrip   Trip     @relation("ClubRequestSenderTrip", fields: [requesterTripId], references: [id], onDelete: Cascade)
+  requesterUser   User     @relation("ClubRequestSenderUser", fields: [requesterUserId], references: [id], onDelete: Cascade)
+
+  @@unique([targetTripId, requesterTripId])
+  @@index([targetTripId, status])
+  @@index([requesterTripId, status])
 }
