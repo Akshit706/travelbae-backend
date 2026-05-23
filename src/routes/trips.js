@@ -15,6 +15,10 @@ const router = express.Router();
 // All routes here require login
 router.use(authenticate);
 
+async function requireMembership(tripId, userId) {
+  return db.tripMember.findFirst({ where: { tripId, userId } });
+}
+
 // Helper: generate a share code like "JAI-4820" or "SOLO-7742"
 function generateShareCode(destination, isSolo) {
   const prefix = isSolo
@@ -204,6 +208,192 @@ router.patch('/:id', async (req, res) => {
   } catch (err) {
     console.error('Update trip error:', err);
     res.status(500).json({ error: 'Could not update trip.' });
+  }
+});
+
+// ── CLUB HUB (discover + requests + my profile) ─────────────
+router.get('/:id/club', async (req, res) => {
+  try {
+    const m = await requireMembership(req.params.id, req.userId);
+    if (!m) return res.status(403).json({ error: 'You are not a member of this trip.' });
+
+    const [myProfile, discover, incomingRequests, outgoingRequests] = await Promise.all([
+      db.clubProfile.findUnique({ where: { tripId: req.params.id } }),
+      db.clubProfile.findMany({
+        where: {
+          status: 'listed',
+          tripId: { not: req.params.id },
+          trip: { completed: false },
+        },
+        include: {
+          trip: {
+            include: {
+              members: true,
+            },
+          },
+        },
+        orderBy: { updatedAt: 'desc' },
+      }),
+      db.clubJoinRequest.findMany({
+        where: { targetTripId: req.params.id, status: 'pending' },
+        include: {
+          requesterTrip: { include: { members: true, clubProfile: true } },
+          requesterUser: { select: { id: true, name: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+      db.clubJoinRequest.findMany({
+        where: { requesterTripId: req.params.id },
+        include: {
+          targetTrip: { include: { members: true, clubProfile: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+    ]);
+
+    res.json({ myProfile, discover, incomingRequests, outgoingRequests });
+  } catch (err) {
+    console.error('Club hub error:', err);
+    res.status(500).json({ error: 'Could not fetch club data.' });
+  }
+});
+
+// ── CLUB PROFILE UPSERT ─────────────────────────────────────
+router.put('/:id/club/profile', async (req, res) => {
+  const { title, about, lookingFor } = req.body;
+
+  if (!title || !about) {
+    return res.status(400).json({ error: 'title and about are required.' });
+  }
+
+  try {
+    const m = await requireMembership(req.params.id, req.userId);
+    if (!m) return res.status(403).json({ error: 'You are not a member of this trip.' });
+
+    const profile = await db.clubProfile.upsert({
+      where: { tripId: req.params.id },
+      create: {
+        tripId: req.params.id,
+        creatorUserId: req.userId,
+        status: 'listed',
+        title: String(title).trim().slice(0, 80),
+        about: String(about).trim().slice(0, 400),
+        lookingFor: lookingFor ? String(lookingFor).trim().slice(0, 160) : null,
+      },
+      update: {
+        title: String(title).trim().slice(0, 80),
+        about: String(about).trim().slice(0, 400),
+        lookingFor: lookingFor ? String(lookingFor).trim().slice(0, 160) : null,
+      },
+    });
+
+    res.json({ profile });
+  } catch (err) {
+    console.error('Upsert club profile error:', err);
+    res.status(500).json({ error: 'Could not save club profile.' });
+  }
+});
+
+// ── CLUB STATUS (listed / snooze) ──────────────────────────
+router.patch('/:id/club/status', async (req, res) => {
+  const { status } = req.body;
+  if (!['listed', 'snooze'].includes(status)) {
+    return res.status(400).json({ error: 'status must be listed or snooze.' });
+  }
+
+  try {
+    const m = await requireMembership(req.params.id, req.userId);
+    if (!m) return res.status(403).json({ error: 'You are not a member of this trip.' });
+
+    const trip = await db.trip.findUnique({ where: { id: req.params.id } });
+    if (!trip) return res.status(404).json({ error: 'Trip not found.' });
+
+    const profile = await db.clubProfile.upsert({
+      where: { tripId: req.params.id },
+      create: {
+        tripId: req.params.id,
+        creatorUserId: req.userId,
+        status,
+        title: trip.groupName,
+        about: `Hey! We are ${trip.groupName}.`,
+      },
+      update: { status },
+    });
+
+    res.json({ profile });
+  } catch (err) {
+    console.error('Update club status error:', err);
+    res.status(500).json({ error: 'Could not update club status.' });
+  }
+});
+
+// ── SEND CLUB REQUEST ───────────────────────────────────────
+router.post('/:id/club/requests', async (req, res) => {
+  const { targetTripId, message } = req.body;
+  if (!targetTripId || !message) {
+    return res.status(400).json({ error: 'targetTripId and message are required.' });
+  }
+
+  try {
+    const m = await requireMembership(req.params.id, req.userId);
+    if (!m) return res.status(403).json({ error: 'You are not a member of this trip.' });
+    if (req.params.id === targetTripId) {
+      return res.status(400).json({ error: 'Cannot send request to your own group.' });
+    }
+
+    const targetProfile = await db.clubProfile.findUnique({ where: { tripId: targetTripId } });
+    if (!targetProfile || targetProfile.status !== 'listed') {
+      return res.status(404).json({ error: 'Target group is not currently listed.' });
+    }
+
+    const request = await db.clubJoinRequest.upsert({
+      where: { targetTripId_requesterTripId: { targetTripId, requesterTripId: req.params.id } },
+      create: {
+        targetTripId,
+        requesterTripId: req.params.id,
+        requesterUserId: req.userId,
+        message: String(message).trim().slice(0, 400),
+        status: 'pending',
+      },
+      update: {
+        requesterUserId: req.userId,
+        message: String(message).trim().slice(0, 400),
+        status: 'pending',
+      },
+    });
+
+    res.status(201).json({ request });
+  } catch (err) {
+    console.error('Send club request error:', err);
+    res.status(500).json({ error: 'Could not send request.' });
+  }
+});
+
+// ── RESPOND TO CLUB REQUEST (accept / decline) ─────────────
+router.patch('/:id/club/requests/:requestId', async (req, res) => {
+  const { action } = req.body;
+  if (!['accepted', 'declined'].includes(action)) {
+    return res.status(400).json({ error: 'action must be accepted or declined.' });
+  }
+
+  try {
+    const m = await requireMembership(req.params.id, req.userId);
+    if (!m) return res.status(403).json({ error: 'You are not a member of this trip.' });
+
+    const existing = await db.clubJoinRequest.findUnique({ where: { id: req.params.requestId } });
+    if (!existing || existing.targetTripId !== req.params.id) {
+      return res.status(404).json({ error: 'Request not found.' });
+    }
+
+    const request = await db.clubJoinRequest.update({
+      where: { id: req.params.requestId },
+      data: { status: action },
+    });
+
+    res.json({ request });
+  } catch (err) {
+    console.error('Respond club request error:', err);
+    res.status(500).json({ error: 'Could not update request.' });
   }
 });
 
