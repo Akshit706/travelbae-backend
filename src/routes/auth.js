@@ -107,4 +107,44 @@ router.get('/me', authenticate, async (req, res) => {
   }
 });
 
+// ── DELETE ACCOUNT ──────────────────────────────────────
+// Permanently deletes the logged-in user, their trip memberships,
+// and any trips where they were the only remaining member.
+// Requires: Authorization header
+router.delete('/me', authenticate, async (req, res) => {
+  try {
+    const userId = req.userId;
+
+    // Find all trips the user is part of
+    const memberships = await db.tripMember.findMany({
+      where: { userId },
+      select: { tripId: true },
+    });
+    const tripIds = memberships.map(m => m.tripId);
+
+    // Delete the user — cascades remove their TripMember rows
+    await db.user.delete({ where: { id: userId } });
+
+    // For each affected trip, if no members remain, delete the trip too
+    // (cascades wipe its expenses, contacts, photos, itinerary)
+    if (tripIds.length) {
+      const remaining = await db.tripMember.groupBy({
+        by: ['tripId'],
+        where: { tripId: { in: tripIds } },
+        _count: { tripId: true },
+      });
+      const stillHasMembers = new Set(remaining.map(r => r.tripId));
+      const orphanTripIds = tripIds.filter(id => !stillHasMembers.has(id));
+      if (orphanTripIds.length) {
+        await db.trip.deleteMany({ where: { id: { in: orphanTripIds } } });
+      }
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Delete account failed:', err);
+    res.status(500).json({ error: 'Could not delete account.' });
+  }
+});
+
 module.exports = router;
