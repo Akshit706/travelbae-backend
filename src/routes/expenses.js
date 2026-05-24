@@ -3,6 +3,7 @@
 //
 // GET    /trips/:id/expenses        — list all expenses
 // POST   /trips/:id/expenses        — add a new expense
+// PATCH  /trips/:id/expenses/:expId — update an expense
 // DELETE /trips/:id/expenses/:expId — delete an expense
 
 const express = require('express');
@@ -60,6 +61,42 @@ router.post('/:id/expenses', async (req, res) => {
   } catch (err) {
     console.error('Add expense error:', err);
     res.status(500).json({ error: 'Could not add expense.' });
+  }
+});
+
+// ── UPDATE EXPENSE ─────────────────────────────────────
+// Body: { desc, amount, paidBy, cat, split, note, date }
+router.patch('/:id/expenses/:expId', async (req, res) => {
+  const membership = await requireMembership(req.params.id, req.userId);
+  if (!membership) return res.status(403).json({ error: 'Not a member of this trip.' });
+
+  const { desc, amount, paidBy, cat, split, note, date } = req.body;
+
+  if (!desc || !amount || !paidBy || !cat || !split) {
+    return res.status(400).json({ error: 'desc, amount, paidBy, cat, and split are required.' });
+  }
+
+  try {
+    const existing = await db.expense.findFirst({ where: { id: req.params.expId, tripId: req.params.id } });
+    if (!existing) return res.status(404).json({ error: 'Expense not found.' });
+
+    const expense = await db.expense.update({
+      where: { id: req.params.expId },
+      data: {
+        desc,
+        amount: parseFloat(amount),
+        paidBy,
+        cat,
+        split,
+        note: note || null,
+        date: date ? new Date(date) : existing.date,
+      },
+    });
+
+    res.json({ expense });
+  } catch (err) {
+    console.error('Update expense error:', err);
+    res.status(500).json({ error: 'Could not update expense.' });
   }
 });
 
