@@ -31,10 +31,19 @@ function mapClubChat(chat, currentTripId) {
     updatedAt: chat.updatedAt,
     otherTripId: otherTrip.id,
     otherTrip,
+    tripA: chat.tripA,
+    tripB: chat.tripB,
     title: `${chat.tripA.groupName} x ${chat.tripB.groupName}`,
     messages: chat.messages,
+    splitExpenses: chat.splitExpenses,
     latestMessage: chat.messages[chat.messages.length - 1] || null,
   };
+}
+
+function buildChatMemberKeys(chat) {
+  const groupA = (chat.tripA?.members || []).map(member => `${chat.tripA.id}:${member.id}`);
+  const groupB = (chat.tripB?.members || []).map(member => `${chat.tripB.id}:${member.id}`);
+  return new Set([...groupA, ...groupB]);
 }
 
 // Helper: generate a share code like "JAI-4820" or "SOLO-7742"
@@ -290,8 +299,20 @@ router.get('/:id/club', async (req, res) => {
           OR: [{ tripAId: req.params.id }, { tripBId: req.params.id }],
         },
         include: {
-          tripA: { include: { members: true, clubProfile: true } },
-          tripB: { include: { members: true, clubProfile: true } },
+          tripA: {
+            include: {
+              members: true,
+              clubProfile: true,
+              photos: { orderBy: { createdAt: 'desc' }, take: 40 },
+            },
+          },
+          tripB: {
+            include: {
+              members: true,
+              clubProfile: true,
+              photos: { orderBy: { createdAt: 'desc' }, take: 40 },
+            },
+          },
           messages: {
             include: {
               senderUser: { select: { id: true, name: true } },
@@ -299,24 +320,38 @@ router.get('/:id/club', async (req, res) => {
             orderBy: { createdAt: 'asc' },
             take: 60,
           },
+          splitExpenses: {
+            orderBy: { createdAt: 'asc' },
+            take: 200,
+          },
         },
         orderBy: { updatedAt: 'desc' },
       }),
     ]);
 
-    // Filter by distance if location provided
+    const referenceLat = userLat != null ? userLat : myProfile?.latitude ?? null;
+    const referenceLng = userLng != null ? userLng : myProfile?.longitude ?? null;
+
+    // Always attach distance when we can calculate it.
     let discover = rawDiscover;
-    if (userLat !== null && userLng !== null && filterRadius !== null) {
-      discover = rawDiscover.filter(profile => {
-        if (!profile.latitude || !profile.longitude) return false; // no location data
-        const dist = calcDistance(userLat, userLng, profile.latitude, profile.longitude);
-        return dist <= filterRadius;
-      }).map(profile => ({
-        ...profile,
-        distance: calcDistance(userLat, userLng, profile.latitude, profile.longitude),
-      }));
-      // Sort by distance
-      discover.sort((a, b) => a.distance - b.distance);
+    if (referenceLat != null && referenceLng != null) {
+      discover = rawDiscover.map(profile => {
+        if (profile.latitude == null || profile.longitude == null) {
+          return { ...profile, distance: null };
+        }
+        return {
+          ...profile,
+          distance: calcDistance(referenceLat, referenceLng, profile.latitude, profile.longitude),
+        };
+      });
+      if (filterRadius != null) {
+        discover = discover.filter(profile => profile.distance != null && profile.distance <= filterRadius);
+      }
+      discover.sort((a, b) => {
+        const da = a.distance == null ? Number.POSITIVE_INFINITY : a.distance;
+        const dbv = b.distance == null ? Number.POSITIVE_INFINITY : b.distance;
+        return da - dbv;
+      });
     }
 
     if (vibe && vibe !== 'any') {
@@ -525,6 +560,9 @@ router.patch('/:id/club/requests/:requestId', async (req, res) => {
               },
               orderBy: { createdAt: 'asc' },
             },
+            splitExpenses: {
+              orderBy: { createdAt: 'asc' },
+            },
           },
         });
       }
@@ -576,6 +614,60 @@ router.post('/:id/club/chats/:chatId/messages', async (req, res) => {
   } catch (err) {
     console.error('Send club chat message error:', err);
     res.status(500).json({ error: 'Could not send chat message.' });
+  }
+});
+
+// ── ADD CLUB CHAT SPLIT EXPENSE ──────────────────────────
+router.post('/:id/club/chats/:chatId/splits', async (req, res) => {
+  const desc = String(req.body?.desc || '').trim();
+  const amount = Number(req.body?.amount);
+  const paidByKey = String(req.body?.paidByKey || '').trim();
+  const splitWithKeys = Array.isArray(req.body?.splitWithKeys)
+    ? req.body.splitWithKeys.map(v => String(v || '').trim()).filter(Boolean)
+    : [];
+
+  if (!desc || !Number.isFinite(amount) || amount <= 0 || !paidByKey || splitWithKeys.length === 0) {
+    return res.status(400).json({ error: 'desc, positive amount, paidByKey, and splitWithKeys are required.' });
+  }
+
+  try {
+    const m = await requireMembership(req.params.id, req.userId);
+    if (!m) return res.status(403).json({ error: 'You are not a member of this trip.' });
+
+    const chat = await db.clubChat.findUnique({
+      where: { id: req.params.chatId },
+      include: {
+        tripA: { include: { members: true } },
+        tripB: { include: { members: true } },
+      },
+    });
+    if (!chat || (chat.tripAId !== req.params.id && chat.tripBId !== req.params.id)) {
+      return res.status(404).json({ error: 'Chat not found.' });
+    }
+
+    const validMemberKeys = buildChatMemberKeys(chat);
+    if (!validMemberKeys.has(paidByKey) || splitWithKeys.some(key => !validMemberKeys.has(key))) {
+      return res.status(400).json({ error: 'Split members are invalid for this combined group.' });
+    }
+
+    const splitExpense = await db.clubChatSplitExpense.create({
+      data: {
+        chatId: chat.id,
+        desc: desc.slice(0, 160),
+        amount,
+        paidByKey,
+        splitWithKeys: splitWithKeys.slice(0, 80),
+        createdByTripId: req.params.id,
+        createdByUserId: req.userId,
+      },
+    });
+
+    await db.clubChat.update({ where: { id: chat.id }, data: {} });
+
+    res.status(201).json({ splitExpense });
+  } catch (err) {
+    console.error('Add club chat split expense error:', err);
+    res.status(500).json({ error: 'Could not add split expense.' });
   }
 });
 
