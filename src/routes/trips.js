@@ -46,6 +46,25 @@ function buildChatMemberKeys(chat) {
   return new Set([...groupA, ...groupB]);
 }
 
+function buildChatMemberLookup(chat) {
+  const map = new Map();
+  (chat.tripA?.members || []).forEach((member) => {
+    map.set(`${chat.tripA.id}:${member.id}`, {
+      tripId: chat.tripA.id,
+      memberId: member.id,
+      nickname: member.nickname,
+    });
+  });
+  (chat.tripB?.members || []).forEach((member) => {
+    map.set(`${chat.tripB.id}:${member.id}`, {
+      tripId: chat.tripB.id,
+      memberId: member.id,
+      nickname: member.nickname,
+    });
+  });
+  return map;
+}
+
 // Helper: generate a share code like "JAI-4820" or "SOLO-7742"
 function generateShareCode(destination, isSolo) {
   const prefix = isSolo
@@ -650,21 +669,66 @@ router.post('/:id/club/chats/:chatId/splits', async (req, res) => {
       return res.status(400).json({ error: 'Split members are invalid for this combined group.' });
     }
 
-    const splitExpense = await db.clubChatSplitExpense.create({
-      data: {
-        chatId: chat.id,
-        desc: desc.slice(0, 160),
-        amount,
-        paidByKey,
-        splitWithKeys: splitWithKeys.slice(0, 80),
-        createdByTripId: req.params.id,
-        createdByUserId: req.userId,
-      },
+    const memberLookup = buildChatMemberLookup(chat);
+    const payer = memberLookup.get(paidByKey);
+    if (!payer) {
+      return res.status(400).json({ error: 'Payer is invalid for this chat.' });
+    }
+
+    const uniqueSplitWithKeys = [...new Set(splitWithKeys)];
+    const splitMembers = uniqueSplitWithKeys
+      .map((key) => memberLookup.get(key))
+      .filter(Boolean);
+    const perHead = amount / splitMembers.length;
+    const chatLabel = `${chat.tripA.groupName} x ${chat.tripB.groupName}`;
+
+    const participantsByTrip = splitMembers.reduce((acc, member) => {
+      if (!acc[member.tripId]) acc[member.tripId] = [];
+      acc[member.tripId].push(member.nickname);
+      return acc;
+    }, {});
+
+    const syncedExpensePayloads = Object.entries(participantsByTrip)
+      .filter(([tripId, splitNames]) => tripId === payer.tripId && splitNames.length > 0)
+      .map(([tripId, splitNames]) => ({
+        tripId,
+        desc: `[Club Chat: ${chatLabel}] ${desc.slice(0, 120)}`,
+        amount: Number((perHead * splitNames.length).toFixed(2)),
+        paidBy: payer.nickname,
+        cat: 'other',
+        split: splitNames,
+        note: `Auto-synced from club split ${chat.id}`,
+        date: new Date(),
+      }));
+
+    const result = await db.$transaction(async (tx) => {
+      const createdSplitExpense = await tx.clubChatSplitExpense.create({
+        data: {
+          chatId: chat.id,
+          desc: desc.slice(0, 160),
+          amount,
+          paidByKey,
+          splitWithKeys: uniqueSplitWithKeys.slice(0, 80),
+          createdByTripId: req.params.id,
+          createdByUserId: req.userId,
+        },
+      });
+
+      const syncedExpenses = [];
+      for (const payload of syncedExpensePayloads) {
+        // Keep each trip's own ledger in sync with combined chat splits.
+        const expense = await tx.expense.create({ data: payload });
+        syncedExpenses.push(expense);
+      }
+
+      await tx.clubChat.update({ where: { id: chat.id }, data: {} });
+      return { createdSplitExpense, syncedExpenses };
     });
 
-    await db.clubChat.update({ where: { id: chat.id }, data: {} });
-
-    res.status(201).json({ splitExpense });
+    res.status(201).json({
+      splitExpense: result.createdSplitExpense,
+      syncedExpenses: result.syncedExpenses,
+    });
   } catch (err) {
     console.error('Add club chat split expense error:', err);
     res.status(500).json({ error: 'Could not add split expense.' });
