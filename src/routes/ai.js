@@ -202,6 +202,76 @@ async function callGeminiWithSearch({ prompt, maxTokens = 8000, temperature = 0.
   return { text, groundingMetadata };
 }
 
+function extractJsonObject(text) {
+  const clean = String(text || '').replace(/```json|```/gi, '').trim();
+  const start = clean.indexOf('{');
+  if (start === -1) throw new Error('No JSON object start found.');
+
+  let depth = 0;
+  let inString = false;
+  let escaping = false;
+  for (let i = start; i < clean.length; i += 1) {
+    const ch = clean[i];
+    if (inString) {
+      if (escaping) {
+        escaping = false;
+      } else if (ch === '\\') {
+        escaping = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === '{') depth += 1;
+    if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) return clean.slice(start, i + 1);
+    }
+  }
+
+  const end = clean.lastIndexOf('}');
+  if (end !== -1 && end > start) return clean.slice(start, end + 1);
+  throw new Error('No complete JSON object found.');
+}
+
+function parseJsonLenient(text) {
+  const candidate = extractJsonObject(text)
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+    .replace(/,\s*([}\]])/g, '$1');
+  return JSON.parse(candidate);
+}
+
+async function parseOrRepairJson(rawText, shapeHint = 'itinerary') {
+  try {
+    return parseJsonLenient(rawText);
+  } catch (firstErr) {
+    const repairPrompt = `
+You will receive malformed JSON that should represent a ${shapeHint} object.
+Return ONLY corrected valid JSON with the same data intent.
+Do not add markdown fences. Do not add comments.
+
+MALFORMED JSON:
+${String(rawText || '').slice(0, 120000)}
+`;
+
+    const repairedText = await callGemini({
+      messages: [{ role: 'user', content: repairPrompt }],
+      maxTokens: 9000,
+      temperature: 0,
+    });
+
+    try {
+      return parseJsonLenient(repairedText);
+    } catch {
+      throw firstErr;
+    }
+  }
+}
+
 // ── CHATBOT ─────────────────────────────────────────────
 router.post('/chat', async (req, res) => {
   const { system, messages } = req.body;
@@ -345,14 +415,7 @@ Return ONLY valid JSON — no markdown, no backticks, no explanation:
       temperature: 0.4,
     });
 
-    const clean = itineraryText.replace(/```json|```/g, '').trim();
-
-    // Find JSON boundaries robustly
-    const jsonStart = clean.indexOf('{');
-    const jsonEnd = clean.lastIndexOf('}');
-    if (jsonStart === -1 || jsonEnd === -1) throw new Error('No JSON found in response');
-
-    const itinerary = JSON.parse(clean.slice(jsonStart, jsonEnd + 1));
+    const itinerary = await parseOrRepairJson(itineraryText, 'travel itinerary');
 
     res.json({ itinerary, sources });
 
@@ -400,10 +463,7 @@ Return ONLY valid JSON:
       text = await callGemini({ messages: [{ role: 'user', content: prompt }], maxTokens: 2000 });
     }
 
-    const clean = text.replace(/```json|```/g, '').trim();
-    const jsonStart = clean.indexOf('{');
-    const jsonEnd = clean.lastIndexOf('}');
-    const data = JSON.parse(clean.slice(jsonStart, jsonEnd + 1));
+    const data = await parseOrRepairJson(text, 'local taste guide');
     res.json(data);
   } catch (err) {
     console.error('Local taste error:', err.message);

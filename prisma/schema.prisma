@@ -123,6 +123,11 @@ model ClubProfile {
   photoUrl    String?  // profile photo for club (base64 or URL)
   latitude    Float?   // location latitude for distance filtering
   longitude   Float?   // location longitude for distance filtering
+  vibe        String?  // chill | adventure | party | foodie | culture | mixed
+  genderMix   String?  // mixed | all-boys | all-girls
+  boysCount   Int?
+  girlsCount  Int?
+  coverTags   String[] @default([])
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 

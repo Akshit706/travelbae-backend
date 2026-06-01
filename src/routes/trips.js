@@ -218,7 +218,7 @@ router.get('/:id/club', async (req, res) => {
     const m = await requireMembership(req.params.id, req.userId);
     if (!m) return res.status(403).json({ error: 'You are not a member of this trip.' });
 
-    const { lat, lng, radius } = req.query;
+    const { lat, lng, radius, vibe, activeOnly } = req.query;
     const userLat = lat ? parseFloat(lat) : null;
     const userLng = lng ? parseFloat(lng) : null;
     const filterRadius = radius ? parseFloat(radius) : null;
@@ -284,6 +284,15 @@ router.get('/:id/club', async (req, res) => {
       discover.sort((a, b) => a.distance - b.distance);
     }
 
+    if (vibe && vibe !== 'any') {
+      discover = discover.filter(profile => (profile.vibe || 'mixed') === vibe);
+    }
+
+    if (activeOnly === '1') {
+      const activeCutoff = Date.now() - 3 * 24 * 60 * 60 * 1000;
+      discover = discover.filter(profile => new Date(profile.updatedAt).getTime() >= activeCutoff);
+    }
+
     res.json({ myProfile, discover, incomingRequests, outgoingRequests });
   } catch (err) {
     console.error('Club hub error:', err);
@@ -292,9 +301,9 @@ router.get('/:id/club', async (req, res) => {
 });
 
 // ── CLUB PROFILE UPSERT ─────────────────────────────────────
-// Body: { title, about, lookingFor, latitude, longitude, photoUrl }
+// Body: { title, about, lookingFor, latitude, longitude, photoUrl, vibe, genderMix, boysCount, girlsCount, coverTags }
 router.put('/:id/club/profile', async (req, res) => {
-  const { title, about, lookingFor, latitude, longitude, photoUrl } = req.body;
+  const { title, about, lookingFor, latitude, longitude, photoUrl, vibe, genderMix, boysCount, girlsCount, coverTags } = req.body;
 
   if (!title || !about) {
     return res.status(400).json({ error: 'title and about are required.' });
@@ -303,6 +312,13 @@ router.put('/:id/club/profile', async (req, res) => {
   try {
     const m = await requireMembership(req.params.id, req.userId);
     if (!m) return res.status(403).json({ error: 'You are not a member of this trip.' });
+
+    const safeTags = Array.isArray(coverTags)
+      ? coverTags
+          .map(t => String(t || '').trim().slice(0, 24))
+          .filter(Boolean)
+          .slice(0, 8)
+      : [];
 
     const profile = await db.clubProfile.upsert({
       where: { tripId: req.params.id },
@@ -316,6 +332,11 @@ router.put('/:id/club/profile', async (req, res) => {
         latitude: latitude !== undefined && latitude !== null ? parseFloat(latitude) : null,
         longitude: longitude !== undefined && longitude !== null ? parseFloat(longitude) : null,
         photoUrl: photoUrl ? String(photoUrl).slice(0, 50000) : null, // base64 limit
+        vibe: vibe ? String(vibe).trim().slice(0, 30) : null,
+        genderMix: genderMix ? String(genderMix).trim().slice(0, 20) : null,
+        boysCount: Number.isFinite(Number(boysCount)) ? Math.max(0, Math.min(99, Number(boysCount))) : null,
+        girlsCount: Number.isFinite(Number(girlsCount)) ? Math.max(0, Math.min(99, Number(girlsCount))) : null,
+        coverTags: safeTags,
       },
       update: {
         title: String(title).trim().slice(0, 80),
@@ -324,6 +345,11 @@ router.put('/:id/club/profile', async (req, res) => {
         latitude: latitude !== undefined && latitude !== null ? parseFloat(latitude) : null,
         longitude: longitude !== undefined && longitude !== null ? parseFloat(longitude) : null,
         photoUrl: photoUrl ? String(photoUrl).slice(0, 50000) : null,
+        vibe: vibe ? String(vibe).trim().slice(0, 30) : null,
+        genderMix: genderMix ? String(genderMix).trim().slice(0, 20) : null,
+        boysCount: Number.isFinite(Number(boysCount)) ? Math.max(0, Math.min(99, Number(boysCount))) : null,
+        girlsCount: Number.isFinite(Number(girlsCount)) ? Math.max(0, Math.min(99, Number(girlsCount))) : null,
+        coverTags: safeTags,
       },
     });
 
@@ -356,6 +382,9 @@ router.patch('/:id/club/status', async (req, res) => {
         status,
         title: trip.groupName,
         about: `Hey! We are ${trip.groupName}.`,
+        vibe: 'mixed',
+        genderMix: 'mixed',
+        coverTags: [],
       },
       update: { status },
     });
