@@ -211,13 +211,31 @@ router.patch('/:id', async (req, res) => {
   }
 });
 
-// ── CLUB HUB (discover + requests + my profile) ─────────────
+// ── CLUB HUB (discover + requests + my profile) with location-based filtering ─────────────
+// Query params: ?lat=<number>&lng=<number>&radius=<number-in-km>
 router.get('/:id/club', async (req, res) => {
   try {
     const m = await requireMembership(req.params.id, req.userId);
     if (!m) return res.status(403).json({ error: 'You are not a member of this trip.' });
 
-    const [myProfile, discover, incomingRequests, outgoingRequests] = await Promise.all([
+    const { lat, lng, radius } = req.query;
+    const userLat = lat ? parseFloat(lat) : null;
+    const userLng = lng ? parseFloat(lng) : null;
+    const filterRadius = radius ? parseFloat(radius) : null;
+
+    // Helper to calculate haversine distance (km)
+    const calcDistance = (lat1, lon1, lat2, lon2) => {
+      const R = 6371; // Earth's radius in km
+      const dLat = ((lat2 - lat1) * Math.PI) / 180;
+      const dLon = ((lon2 - lon1) * Math.PI) / 180;
+      const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + 
+                Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * 
+                Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return R * c;
+    };
+
+    const [myProfile, rawDiscover, incomingRequests, outgoingRequests] = await Promise.all([
       db.clubProfile.findUnique({ where: { tripId: req.params.id } }),
       db.clubProfile.findMany({
         where: {
@@ -251,6 +269,21 @@ router.get('/:id/club', async (req, res) => {
       }),
     ]);
 
+    // Filter by distance if location provided
+    let discover = rawDiscover;
+    if (userLat !== null && userLng !== null && filterRadius !== null) {
+      discover = rawDiscover.filter(profile => {
+        if (!profile.latitude || !profile.longitude) return false; // no location data
+        const dist = calcDistance(userLat, userLng, profile.latitude, profile.longitude);
+        return dist <= filterRadius;
+      }).map(profile => ({
+        ...profile,
+        distance: calcDistance(userLat, userLng, profile.latitude, profile.longitude),
+      }));
+      // Sort by distance
+      discover.sort((a, b) => a.distance - b.distance);
+    }
+
     res.json({ myProfile, discover, incomingRequests, outgoingRequests });
   } catch (err) {
     console.error('Club hub error:', err);
@@ -259,8 +292,9 @@ router.get('/:id/club', async (req, res) => {
 });
 
 // ── CLUB PROFILE UPSERT ─────────────────────────────────────
+// Body: { title, about, lookingFor, latitude, longitude, photoUrl }
 router.put('/:id/club/profile', async (req, res) => {
-  const { title, about, lookingFor } = req.body;
+  const { title, about, lookingFor, latitude, longitude, photoUrl } = req.body;
 
   if (!title || !about) {
     return res.status(400).json({ error: 'title and about are required.' });
@@ -279,11 +313,17 @@ router.put('/:id/club/profile', async (req, res) => {
         title: String(title).trim().slice(0, 80),
         about: String(about).trim().slice(0, 400),
         lookingFor: lookingFor ? String(lookingFor).trim().slice(0, 160) : null,
+        latitude: latitude !== undefined && latitude !== null ? parseFloat(latitude) : null,
+        longitude: longitude !== undefined && longitude !== null ? parseFloat(longitude) : null,
+        photoUrl: photoUrl ? String(photoUrl).slice(0, 50000) : null, // base64 limit
       },
       update: {
         title: String(title).trim().slice(0, 80),
         about: String(about).trim().slice(0, 400),
         lookingFor: lookingFor ? String(lookingFor).trim().slice(0, 160) : null,
+        latitude: latitude !== undefined && latitude !== null ? parseFloat(latitude) : null,
+        longitude: longitude !== undefined && longitude !== null ? parseFloat(longitude) : null,
+        photoUrl: photoUrl ? String(photoUrl).slice(0, 50000) : null,
       },
     });
 
