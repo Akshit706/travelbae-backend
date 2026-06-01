@@ -19,6 +19,24 @@ async function requireMembership(tripId, userId) {
   return db.tripMember.findFirst({ where: { tripId, userId } });
 }
 
+function getClubChatPair(tripOneId, tripTwoId) {
+  return [tripOneId, tripTwoId].sort((a, b) => a.localeCompare(b));
+}
+
+function mapClubChat(chat, currentTripId) {
+  const otherTrip = chat.tripAId === currentTripId ? chat.tripB : chat.tripA;
+  return {
+    id: chat.id,
+    createdAt: chat.createdAt,
+    updatedAt: chat.updatedAt,
+    otherTripId: otherTrip.id,
+    otherTrip,
+    title: `${chat.tripA.groupName} x ${chat.tripB.groupName}`,
+    messages: chat.messages,
+    latestMessage: chat.messages[chat.messages.length - 1] || null,
+  };
+}
+
 // Helper: generate a share code like "JAI-4820" or "SOLO-7742"
 function generateShareCode(destination, isSolo) {
   const prefix = isSolo
@@ -235,7 +253,7 @@ router.get('/:id/club', async (req, res) => {
       return R * c;
     };
 
-    const [myProfile, rawDiscover, incomingRequests, outgoingRequests] = await Promise.all([
+    const [myProfile, rawDiscover, incomingRequests, outgoingRequests, chats] = await Promise.all([
       db.clubProfile.findUnique({ where: { tripId: req.params.id } }),
       db.clubProfile.findMany({
         where: {
@@ -267,6 +285,23 @@ router.get('/:id/club', async (req, res) => {
         },
         orderBy: { createdAt: 'desc' },
       }),
+      db.clubChat.findMany({
+        where: {
+          OR: [{ tripAId: req.params.id }, { tripBId: req.params.id }],
+        },
+        include: {
+          tripA: { include: { members: true, clubProfile: true } },
+          tripB: { include: { members: true, clubProfile: true } },
+          messages: {
+            include: {
+              senderUser: { select: { id: true, name: true } },
+            },
+            orderBy: { createdAt: 'asc' },
+            take: 60,
+          },
+        },
+        orderBy: { updatedAt: 'desc' },
+      }),
     ]);
 
     // Filter by distance if location provided
@@ -293,7 +328,13 @@ router.get('/:id/club', async (req, res) => {
       discover = discover.filter(profile => new Date(profile.updatedAt).getTime() >= activeCutoff);
     }
 
-    res.json({ myProfile, discover, incomingRequests, outgoingRequests });
+    res.json({
+      myProfile,
+      discover,
+      incomingRequests,
+      outgoingRequests,
+      chats: chats.map(chat => mapClubChat(chat, req.params.id)),
+    });
   } catch (err) {
     console.error('Club hub error:', err);
     res.status(500).json({ error: 'Could not fetch club data.' });
@@ -415,6 +456,14 @@ router.post('/:id/club/requests', async (req, res) => {
       return res.status(404).json({ error: 'Target group is not currently listed.' });
     }
 
+    const [tripAId, tripBId] = getClubChatPair(req.params.id, targetTripId);
+    const existingChat = await db.clubChat.findUnique({
+      where: { tripAId_tripBId: { tripAId, tripBId } },
+    });
+    if (existingChat) {
+      return res.status(409).json({ error: 'You already have an active chat with this group.' });
+    }
+
     const request = await db.clubJoinRequest.upsert({
       where: { targetTripId_requesterTripId: { targetTripId, requesterTripId: req.params.id } },
       create: {
@@ -454,15 +503,79 @@ router.patch('/:id/club/requests/:requestId', async (req, res) => {
       return res.status(404).json({ error: 'Request not found.' });
     }
 
-    const request = await db.clubJoinRequest.update({
-      where: { id: req.params.requestId },
-      data: { status: action },
+    const result = await db.$transaction(async (tx) => {
+      const request = await tx.clubJoinRequest.update({
+        where: { id: req.params.requestId },
+        data: { status: action },
+      });
+
+      let chat = null;
+      if (action === 'accepted') {
+        const [tripAId, tripBId] = getClubChatPair(existing.targetTripId, existing.requesterTripId);
+        chat = await tx.clubChat.upsert({
+          where: { tripAId_tripBId: { tripAId, tripBId } },
+          create: { tripAId, tripBId },
+          update: {},
+          include: {
+            tripA: { include: { members: true, clubProfile: true } },
+            tripB: { include: { members: true, clubProfile: true } },
+            messages: {
+              include: {
+                senderUser: { select: { id: true, name: true } },
+              },
+              orderBy: { createdAt: 'asc' },
+            },
+          },
+        });
+      }
+
+      return { request, chat };
     });
 
-    res.json({ request });
+    res.json({
+      request: result.request,
+      chat: result.chat ? mapClubChat(result.chat, req.params.id) : null,
+    });
   } catch (err) {
     console.error('Respond club request error:', err);
     res.status(500).json({ error: 'Could not update request.' });
+  }
+});
+
+// ── SEND CLUB CHAT MESSAGE ────────────────────────────────
+router.post('/:id/club/chats/:chatId/messages', async (req, res) => {
+  const text = String(req.body?.text || '').trim();
+  if (!text) {
+    return res.status(400).json({ error: 'text is required.' });
+  }
+
+  try {
+    const m = await requireMembership(req.params.id, req.userId);
+    if (!m) return res.status(403).json({ error: 'You are not a member of this trip.' });
+
+    const chat = await db.clubChat.findUnique({ where: { id: req.params.chatId } });
+    if (!chat || (chat.tripAId !== req.params.id && chat.tripBId !== req.params.id)) {
+      return res.status(404).json({ error: 'Chat not found.' });
+    }
+
+    const message = await db.clubChatMessage.create({
+      data: {
+        chatId: chat.id,
+        senderTripId: req.params.id,
+        senderUserId: req.userId,
+        text: text.slice(0, 1000),
+      },
+      include: {
+        senderUser: { select: { id: true, name: true } },
+      },
+    });
+
+    await db.clubChat.update({ where: { id: chat.id }, data: {} });
+
+    res.status(201).json({ message });
+  } catch (err) {
+    console.error('Send club chat message error:', err);
+    res.status(500).json({ error: 'Could not send chat message.' });
   }
 });
 
