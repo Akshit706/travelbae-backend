@@ -637,6 +637,26 @@ router.post('/:id/club/chats/:chatId/messages', async (req, res) => {
 });
 
 // ── ADD CLUB CHAT SPLIT EXPENSE ──────────────────────────
+// ── DELETE CLUB CHAT ─────────────────────────────────────
+router.delete('/:id/club/chats/:chatId', async (req, res) => {
+  try {
+    const m = await requireMembership(req.params.id, req.userId);
+    if (!m) return res.status(403).json({ error: 'You are not a member of this trip.' });
+
+    const chat = await db.clubChat.findUnique({ where: { id: req.params.chatId } });
+    if (!chat || (chat.tripAId !== req.params.id && chat.tripBId !== req.params.id)) {
+      return res.status(404).json({ error: 'Chat not found.' });
+    }
+
+    await db.clubChat.delete({ where: { id: req.params.chatId } });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Delete club chat error:', err);
+    res.status(500).json({ error: 'Could not delete chat.' });
+  }
+});
+
+// ── ADD CLUB CHAT SPLIT EXPENSE ──────────────────────────
 router.post('/:id/club/chats/:chatId/splits', async (req, res) => {
   const desc = String(req.body?.desc || '').trim();
   const amount = Number(req.body?.amount);
