@@ -657,6 +657,45 @@ router.delete('/:id/club/chats/:chatId', async (req, res) => {
 });
 
 // ── ADD CLUB CHAT SPLIT EXPENSE ──────────────────────────
+router.delete('/:id/club/chats/:chatId/splits/:splitId', async (req, res) => {
+  try {
+    const m = await requireMembership(req.params.id, req.userId);
+    if (!m) return res.status(403).json({ error: 'You are not a member of this trip.' });
+
+    const chat = await db.clubChat.findUnique({ where: { id: req.params.chatId } });
+    if (!chat || (chat.tripAId !== req.params.id && chat.tripBId !== req.params.id)) {
+      return res.status(404).json({ error: 'Chat not found.' });
+    }
+
+    const split = await db.clubChatSplitExpense.findUnique({ where: { id: req.params.splitId } });
+    if (!split || split.chatId !== chat.id) {
+      return res.status(404).json({ error: 'Split expense not found.' });
+    }
+
+    if (split.createdByTripId !== req.params.id) {
+      return res.status(403).json({ error: 'Only the creator group can delete this split expense.' });
+    }
+
+    await db.$transaction(async (tx) => {
+      await tx.clubChatSplitExpense.delete({ where: { id: split.id } });
+      // For newly created synced records, remove matching ledger entries too.
+      await tx.expense.deleteMany({
+        where: {
+          tripId: split.createdByTripId,
+          note: `Auto-synced from club split ${chat.id}:${split.id}`,
+        },
+      });
+      await tx.clubChat.update({ where: { id: chat.id }, data: {} });
+    });
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('Delete club chat split expense error:', err);
+    return res.status(500).json({ error: 'Could not delete split expense.' });
+  }
+});
+
+// ── ADD CLUB CHAT SPLIT EXPENSE ──────────────────────────
 router.post('/:id/club/chats/:chatId/splits', async (req, res) => {
   const desc = String(req.body?.desc || '').trim();
   const amount = Number(req.body?.amount);
@@ -708,19 +747,6 @@ router.post('/:id/club/chats/:chatId/splits', async (req, res) => {
       return acc;
     }, {});
 
-    const syncedExpensePayloads = Object.entries(participantsByTrip)
-      .filter(([tripId, splitNames]) => tripId === payer.tripId && splitNames.length > 0)
-      .map(([tripId, splitNames]) => ({
-        tripId,
-        desc: `[Club Chat: ${chatLabel}] ${desc.slice(0, 120)}`,
-        amount: Number((perHead * splitNames.length).toFixed(2)),
-        paidBy: payer.nickname,
-        cat: 'other',
-        split: splitNames,
-        note: `Auto-synced from club split ${chat.id}`,
-        date: new Date(),
-      }));
-
     const result = await db.$transaction(async (tx) => {
       const createdSplitExpense = await tx.clubChatSplitExpense.create({
         data: {
@@ -733,6 +759,19 @@ router.post('/:id/club/chats/:chatId/splits', async (req, res) => {
           createdByUserId: req.userId,
         },
       });
+
+      const syncedExpensePayloads = Object.entries(participantsByTrip)
+        .filter(([tripId, splitNames]) => tripId === payer.tripId && splitNames.length > 0)
+        .map(([tripId, splitNames]) => ({
+          tripId,
+          desc: `[Club Chat: ${chatLabel}] ${desc.slice(0, 120)}`,
+          amount: Number((perHead * splitNames.length).toFixed(2)),
+          paidBy: payer.nickname,
+          cat: 'other',
+          split: splitNames,
+          note: `Auto-synced from club split ${chat.id}:${createdSplitExpense.id}`,
+          date: new Date(),
+        }));
 
       const syncedExpenses = [];
       for (const payload of syncedExpensePayloads) {
