@@ -35,8 +35,10 @@ model Trip {
   isSolo      Boolean  @default(false)
   shareCode   String   @unique
   coverUrl    String?
-  budget      Float?
-  createdAt   DateTime @default(now())
+  budget           Float?
+  cachedItinerary  Json?    // persisted AI-generated itinerary { itinerary, sources }
+  cachedTaste      Json?    // persisted AI-generated local taste data
+  createdAt        DateTime @default(now())
 
   // Relations
   members     TripMember[]

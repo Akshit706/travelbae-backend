@@ -233,6 +233,35 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
+// ── SAVE AI CACHE (itinerary + taste) ──────────────────
+// Called by any member after generation to persist so all members see it.
+// Body: { cachedItinerary?, cachedTaste? }
+// Either field can be null to clear it (e.g. on "regenerate").
+router.patch('/:id/ai-cache', async (req, res) => {
+  try {
+    const membership = await requireMembership(req.params.id, req.userId);
+    if (!membership) return res.status(403).json({ error: 'You are not a member of this trip.' });
+
+    const update = {};
+    if (Object.prototype.hasOwnProperty.call(req.body, 'cachedItinerary')) {
+      update.cachedItinerary = req.body.cachedItinerary; // can be null (clears it)
+    }
+    if (Object.prototype.hasOwnProperty.call(req.body, 'cachedTaste')) {
+      update.cachedTaste = req.body.cachedTaste;
+    }
+
+    if (Object.keys(update).length === 0) {
+      return res.status(400).json({ error: 'Provide cachedItinerary and/or cachedTaste.' });
+    }
+
+    const trip = await db.trip.update({ where: { id: req.params.id }, data: update });
+    res.json({ ok: true, cachedItinerary: trip.cachedItinerary, cachedTaste: trip.cachedTaste });
+  } catch (err) {
+    console.error('Save AI cache error:', err);
+    res.status(500).json({ error: 'Could not save AI cache.' });
+  }
+});
+
 // ── UPDATE TRIP (mark complete / restore) ───────────────
 router.patch('/:id', async (req, res) => {
   try {
