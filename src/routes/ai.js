@@ -142,7 +142,8 @@ const router = express.Router();
 router.use(authenticate);
 
 // ── Gemini URLs ─────────────────────────────────────────
-function geminiUrl(model = 'gemini-3.1-flash-lite') {
+// function geminiUrl(model = 'gemini-3.1-flash-lite') {
+function geminiUrl(model = 'gemini-2.5-flash') {
   return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`;
 }
 
@@ -180,7 +181,8 @@ async function callGemini({ system, messages, maxTokens = 1000, temperature = 0.
 // Uses real-time web search to pull data from TripAdvisor,
 // Lonely Planet, Google Travel, Nomadic Matt, WikiVoyage etc.
 async function callGeminiWithSearch({ prompt, maxTokens = 8000, temperature = 0.3 }) {
-  const res = await fetch(geminiUrl('gemini-3.1-flash-lite'), {
+  // const res = await fetch(geminiUrl('gemini-3.1-flash-lite'), {
+  const res = await fetch(geminiUrl('gemini-2.5-flash'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -474,6 +476,35 @@ Return ONLY valid JSON:
 
 const photoCache = new Map();
 
+// Shared noise filter – skip flags, maps, logos, portraits, SVG/GIF
+const PHOTO_NOISE_RE = /flag|logo|map|seal|coat|icon|emblem|portrait|locator|location|blank|outline|stub/i;
+
+async function commonsSearch(q, limit = 15) {
+  const url =
+    `https://commons.wikimedia.org/w/api.php?action=query` +
+    `&generator=search&gsrsearch=${encodeURIComponent(q)}` +
+    `&gsrnamespace=6&gsrlimit=${limit}` +
+    `&prop=imageinfo&iiprop=url|size&iiurlwidth=900` +
+    `&format=json&origin=*`;
+  const r = await fetch(url, {
+    headers: { 'User-Agent': 'TravelBae/1.0 (contact@travelbae.app)' },
+  });
+  const data = await r.json();
+  const pages = data.query?.pages || {};
+  return Object.values(pages)
+    .filter(p => {
+      const info = p.imageinfo?.[0];
+      if (!info?.url) return false;
+      const fname = (p.title || '').toLowerCase();
+      if (PHOTO_NOISE_RE.test(fname)) return false;
+      if (!/\.(jpg|jpeg|png|webp)$/i.test(info.url)) return false;
+      // prefer landscape / reasonable size
+      if (info.width && info.height && info.width < info.height) return false;
+      return true;
+    })
+    .map(p => p.imageinfo[0].thumburl || p.imageinfo[0].url);
+}
+
 router.get('/photos', async (req, res) => {
   const { q } = req.query;
   if (!q) return res.status(400).json({ error: 'q is required' });
@@ -483,26 +514,29 @@ router.get('/photos', async (req, res) => {
   }
 
   try {
-    const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(q)}&gsrnamespace=6&gsrlimit=3&prop=imageinfo&iiprop=url|size&iiurlwidth=600&format=json&origin=*`;
-    const r = await fetch(searchUrl, {
-      headers: { 'User-Agent': 'TravelBae/1.0 (contact@travelbae.app)' }
-    });
-    const text = await r.text();
-    if (text.startsWith('You are making')) {
-      return res.json({ urls: [] });
-    }
-    const data = JSON.parse(text);
-    const pages = data.query?.pages || {};
-    const urls = Object.values(pages)
-      .filter(p => p.imageinfo?.[0]?.url)
-      .filter(p => p.imageinfo[0].url.toLowerCase().match(/\.(jpg|jpeg|png|webp)$/))
-      .map(p => p.imageinfo[0].thumburl || p.imageinfo[0].url)
-      .slice(0, 3);
+    // Pass 1 — landmark-specific
+    let urls = await commonsSearch(`${q} monument landmark historic`);
 
-    photoCache.set(q, urls);
+    // Pass 2 — broader if still short
+    if (urls.length < 3) {
+      const more = await commonsSearch(q);
+      urls = [...new Set([...urls, ...more])];
+    }
+
+    // Pass 3 — strip qualifiers, bare city/place name
+    if (urls.length < 3) {
+      const bare = q.split(',')[0].trim();
+      if (bare !== q) {
+        const more = await commonsSearch(bare);
+        urls = [...new Set([...urls, ...more])];
+      }
+    }
+
+    const result = urls.slice(0, 3);
+    photoCache.set(q, result);
     setTimeout(() => photoCache.delete(q), 60 * 60 * 1000);
 
-    res.json({ urls });
+    res.json({ urls: result });
   } catch (err) {
     console.error('Wikimedia photos error:', err.message);
     res.status(500).json({ error: 'Could not fetch photos' });
