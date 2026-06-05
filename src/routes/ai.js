@@ -700,40 +700,68 @@ router.post('/local-taste', async (req, res) => {
   console.log(`\n🍜 LOCAL TASTE: ${destination}`);
   try {
     const searchResults = await serperMultiSearch([
-      `${destination} must eat local food dishes authentic cuisine`,
-      `${destination} best street food stalls local restaurants hidden gems`,
-    ], 8);
-    const { context } = await buildResearchContext(searchResults);
+      `${destination} must eat iconic local dishes authentic cuisine what to eat`,
+      `${destination} famous street food stalls best local restaurants named places`,
+      `${destination} unique food experiences cooking class market food tour`,
+      `${destination} signature dish regional specialty food culture`,
+    ], 10);
+    const { context } = await buildResearchContext(searchResults, 5);
 
-    const tastePrompt = `You are a food travel writer. Extract a local taste guide for "${destination}" using ONLY the research context below.
+    const tastePrompt = `You are a senior food & travel editor writing the definitive local taste guide for "${destination}". Your readers are discerning travellers who will cross-check everything — so every single item must be genuinely famous, regionally significant, or a well-known local institution. Nothing generic, nothing that could apply to any city.
 
 RESEARCH CONTEXT:
 ${context}
 
+QUALITY BAR — an item only makes the list if it passes ALL of these:
+1. It is specifically named (a real dish name, a real place name — not "local curry" or "street market")
+2. It is mentioned or implied in the research context above
+3. It is something a knowledgeable local or food critic would vouch for
+4. It would genuinely disappoint a traveller if they missed it
+
+For DISHES: include only the signature, regionally-defining dishes of ${destination}. The kind you read about before you visit. Describe what makes THIS version unique vs elsewhere.
+For PLACES: only include restaurants, stalls, or markets that are named institutions — places with a reputation, a history, or a loyal following. Not just "a good place for pad thai".
+For EXPERIENCES: only food-related experiences that are distinctly local — a specific morning market, a particular cooking style, a neighbourhood known for a single dish, a festival food tradition.
+
 Return ONLY valid JSON (no markdown, no backticks):
 {
   "headline": "${destination} — Local Flavours",
-  "tagline": "one-liner about this destination's food identity",
+  "tagline": "one punchy line capturing this destination's food soul",
   "dishes": [
-    { "emoji": "🍜", "name": "exact dish name", "desc": "where to get it and what makes it special", "tags": ["must-try"] }
+    {
+      "emoji": "🍜",
+      "name": "exact dish name",
+      "desc": "what makes it special here specifically, and the best-known place to get it",
+      "tags": ["must-try"]
+    }
   ],
   "places": [
-    { "emoji": "📍", "name": "exact place name", "desc": "what makes it unmissable", "tags": ["iconic"] }
+    {
+      "emoji": "📍",
+      "name": "exact restaurant / stall / market name",
+      "desc": "why it is an institution — its history, signature item, or what locals say about it",
+      "tags": ["iconic"]
+    }
   ],
   "experiences": [
-    { "emoji": "✨", "name": "experience name", "desc": "why locals love it", "tags": ["offbeat"] }
+    {
+      "emoji": "✨",
+      "name": "specific named experience",
+      "desc": "why a traveller would regret missing this",
+      "tags": ["offbeat"]
+    }
   ],
-  "tip": "single best insider tip a local would give"
+  "tip": "one ultra-specific insider tip — a timing, an off-menu order, a neighbourhood secret. Not generic advice."
 }
 Rules:
-- Exactly 4 items in each array
-- Every entry must be specific and named — no generics
-- Tags: must-try, must-do, iconic, heritage, scenic, culture, offbeat, hidden-gem, seasonal
-- Use ONLY information from the context`;
+- 5–6 items in dishes, 4–5 in places, 3–4 in experiences
+- Every entry must be specific, named, and pass the quality bar above
+- Never repeat the same place across sections
+- Tags choose from: must-try, must-do, iconic, heritage, scenic, culture, offbeat, hidden-gem, seasonal, local-favourite
+- Use ONLY information grounded in the research context`;
 
     const tasteText = await callGemini({
       messages: [{ role: 'user', content: tastePrompt }],
-      maxTokens: 2000, temperature: 0.1,
+      maxTokens: 3500, temperature: 0.1,
     });
     const data = await parseOrRepair(tasteText, 'local taste');
     console.log(`✅ [LOCAL TASTE] ${data.dishes?.length} dishes, ${data.places?.length} places`);
