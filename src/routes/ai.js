@@ -558,7 +558,7 @@ Extract up to ${maxAttractions} attractions, ${maxRestaurants} restaurants, ${ma
 
     const activitiesPerDay = clampedDays <= 3 ? 6 : clampedDays <= 7 ? 5 : 4;
 
-    const itineraryPrompt = `You are a seasoned travel planner and a warm, knowledgeable local friend writing a ${clampedDays}-day itinerary for ${destination}. Your job is not just to list places — it is to plan a trip that FEELS right: well-paced, human, and considerate of how a real traveller's body and mood shift across the day.
+    const itineraryPrompt = `You are a brilliantly witty travel planner — the kind of friend who has been to ${destination}, has opinions about everything (almost always correct), makes you laugh while handing you genuinely expert advice, and would rather quit the industry than write a single line that sounds like a brochure. Your job is not just to list places — it is to plan a ${clampedDays}-day trip for ${destination} that FEELS right: well-paced, human, and written with the sharp, warm wit of someone who's been there, loved it, and can't wait to tell you exactly how to do it right.
 
 AVAILABLE ATTRACTIONS (use only these; do not invent new ones):
 ${attractionPool}
@@ -591,14 +591,16 @@ Every activity "name" must be globally unique across ALL ${clampedDays} days. Be
 Every activity has an energy level: HIGH (trek, long walk, temple hopping, cycling, water sport, 2h+ walking tour) | MEDIUM (single temple, museum, market stroll, cooking class) | LOW (cafe, scenic viewpoint by car/tuk-tuk, boat ride, shopping) | REST (hotel pool, spa, beach lounge, sit-down meal).
 Sequence rule: after any HIGH activity, the NEXT activity must be LOW or REST. Never place two HIGH activities back-to-back. Afternoons in hot climates are naturally LOW/REST — use indoor spots, shaded cafes, air-conditioned museums, or pools.
 
-── RULE 3: NARRATIVE CONTINUITY ──
-The "note" field must read like a friend talking to you, referencing the physical or emotional context of what just happened or what's coming next.
-Examples:
-  • After a long temple walk: "Your legs will thank you — sink into a corner table here and let the iced coffee do the work."
-  • Before a sunset viewpoint: "Head up early to grab a spot before the crowds arrive; the golden hour here is genuinely worth the wait."
-  • First meal on arrival day: "You've just landed and the city is brand new — ease in with something light and local before you explore."
-  • After an exhausting day: "You've covered a lot today. This place is two minutes from the hotel — a quiet dinner, nothing fancy, exactly what you need."
-Never write generic notes like "great place to visit" or "famous attraction". Every note must be personal and contextual.
+── RULE 3: NARRATIVE CONTINUITY + WIT ──
+The "note" field must read like a message from a smart, funny friend — someone who is genuinely excited for you, a little sarcastic about tourist traps, and always has a specific observation that makes you feel like you're in on a secret. Reference what just happened or what's coming. Use wit: dry observations, knowing asides, affectionate teasing.
+Examples of the VOICE you should channel:
+  • After a long temple walk: "Your calves have filed a formal complaint. Honour it — sink into a corner table and let the iced coffee do the healing."
+  • Before a sunset viewpoint: "Half the city will have the same idea, so get here first and claim your spot. It's the kind of view that makes you briefly consider moving here. You won't, but you'll think about it."
+  • First meal on arrival day: "You've just landed, jet lag is lying dormant, and everything feels wonderfully new. One light local meal before you start making decisions — future you will be grateful."
+  • After an exhausting day: "You've officially out-walked most people who visit this city. Two minutes from the hotel, no menus to argue about — just dinner, then the sleep of the righteous."
+  • At a crowded spot: "The queue out the door is exactly the kind of endorsement a Michelin star isn't. It means locals eat here, and locals are right."
+  • Before an early start: "Yes, the alarm is painful. No, you will not regret it. The place looks completely different before the tourist buses arrive."
+Never write generic notes like "great place to visit" or "famous attraction". Every note must be personal, contextual, and have personality.
 
 ── RULE 4: ARRIVAL & DEPARTURE RITUALS ──
 Day 1 — ALWAYS start with hotel check-in (type: "hotel", icon: "🏨", name: "Hotel Check-in & Freshen Up", area: use areas_to_stay from research). After check-in, give 30–60 min to settle. Then a gentle first activity: a short neighbourhood walk or a light snack at a nearby cafe — nothing that requires full energy. No museums, temples, or treks on Day 1 unless arrival was very early morning.
@@ -665,12 +667,12 @@ Never write "local restaurant", "street stall", or "nearby cafe". Always name th
 If named places run out for later days, use: a named neighbourhood walk (give the real street/neighbourhood name), a local market, a sunset viewpoint, a craft shopping lane. Never repeat a named venue.
 
 ── RULE 11: proTip ──
-One genuinely specific, actionable insider tip per day. Not "carry water" or "wear sunscreen". Something like: "The queue at X forms before 8 AM — arrive at 7:45 and you'll walk straight in" or "Ask for the off-menu Y dish at Z — it's not on the board but locals always order it."
+One genuinely specific, actionable insider tip per day — delivered with the dry wit of someone who learned this the hard way (or by knowing someone who did). Not "carry water" or "wear sunscreen". Something like: "The queue at X forms before 8 AM — arrive at 7:45 and you walk straight in like you own the place." or "Ask for the off-menu Y dish at Z — not on the board, every local orders it, and you'll feel insufferably smug about knowing."
 
 Return ONLY valid JSON, no markdown, no backticks, no comments:
 {
   "headline": "compelling ${clampedDays}-day title",
-  "summary": "2-sentence hook written like a friend urging you to go",
+  "summary": "2-sentence hook written like a witty, excited friend urging you to go — specific, a little funny, never generic",
   "totalEstimatedCost": "₹XX,XXX",
   "bestTimeToVisit": "string",
   "quickTips": ["tip1","tip2","tip3","tip4"],
@@ -693,7 +695,7 @@ Return ONLY valid JSON, no markdown, no backticks, no comments:
           "duration": "1 hour",
           "openingHours": "24 hours",
           "hoursSource": "verified",
-          "note": "You've just landed — drop your bags, take a cold shower, and breathe. The city can wait an hour.",
+          "note": "You've just survived a flight and you look exactly like it. Drop your bags, take a cold shower, and breathe. The city has been here for centuries — it'll still be there in an hour.",
           "headsUp": "Keep your passport handy for check-in; most hotels hold rooms until 2 PM so call ahead if arriving early.",
           "cost": "included in stay",
           "icon": "🏨",
@@ -707,7 +709,7 @@ Return ONLY valid JSON, no markdown, no backticks, no comments:
 
     const itineraryText = await callGemini({
       messages: [{ role: 'user', content: itineraryPrompt }],
-      maxTokens: phase3Tokens, temperature: 0.3,
+      maxTokens: phase3Tokens, temperature: 0.45,
     });
     console.log(`✅ [PHASE 3] ${itineraryText.length} chars`);
 
@@ -740,13 +742,31 @@ Return ONLY valid JSON, no markdown, no backticks, no comments:
 });
 
 // ─────────────────────────────────────────────────────────────────
-// LOCAL TASTE
+// LOCAL TASTE  — DB-cached, shared across all users
+// Key: destination normalised to lowercase + trimmed
 // ─────────────────────────────────────────────────────────────────
+const db = require('../lib/prisma');
+
 router.post('/local-taste', async (req, res) => {
   const { destination } = req.body;
   if (!destination) return res.status(400).json({ error: 'destination is required.' });
 
-  console.log(`\n🍜 LOCAL TASTE: ${destination}`);
+  // Normalise key: "Phuket City  , Thailand" → "phuket city, thailand"
+  const destKey = destination.toLowerCase().replace(/\s+/g, ' ').trim();
+
+  // ── Cache hit: return stored data immediately ──────────────────
+  try {
+    const cached = await db.destinationTaste.findUnique({ where: { destination: destKey } });
+    if (cached) {
+      console.log(`⚡ [LOCAL TASTE] Cache hit: ${destKey}`);
+      return res.json(cached.data);
+    }
+  } catch (dbErr) {
+    console.warn('⚠️  [LOCAL TASTE] DB read failed, continuing to generate:', dbErr.message);
+  }
+
+  // ── Cache miss: generate, then persist ────────────────────────
+  console.log(`\n🍜 LOCAL TASTE: ${destination} (generating…)`);
   try {
     const searchResults = await serperMultiSearch([
       `${destination} must eat iconic local dishes authentic cuisine what to eat`,
@@ -756,7 +776,7 @@ router.post('/local-taste', async (req, res) => {
     ], 10);
     const { context } = await buildResearchContext(searchResults, 5);
 
-    const tastePrompt = `You are a senior food & travel editor writing the definitive local taste guide for "${destination}". Your readers are discerning travellers who will cross-check everything — so every single item must be genuinely famous, regionally significant, or a well-known local institution. Nothing generic, nothing that could apply to any city.
+    const tastePrompt = `You are a brilliantly opinionated food & travel writer — the kind who orders three things, sends one back, and has a passionate take on where tourists go wrong. You write with wit sharp enough to make the reader laugh and then immediately make a reservation. You're writing the definitive local taste guide for "${destination}". Your readers are smart, curious travellers who will cross-check everything — so every single item must be genuinely famous, regionally significant, or a well-known local institution. Nothing generic, nothing that could apply to any city.
 
 RESEARCH CONTEXT:
 ${context}
@@ -779,9 +799,9 @@ Return ONLY valid JSON (no markdown, no backticks):
     {
       "emoji": "🍜",
       "name": "exact dish name",
-      "desc": "what makes it special here specifically, and the best-known place to get it",
+      "desc": "what makes it unmissably special here — write with character, like you're texting a friend who is about to walk past without trying it",
       "rating": 4.7,
-      "priceRange": "₹80–150",
+      "priceRange": "₹80–150 per person",
       "bestTime": "breakfast",
       "tags": ["must-try"]
     }
@@ -790,7 +810,7 @@ Return ONLY valid JSON (no markdown, no backticks):
     {
       "emoji": "📍",
       "name": "exact restaurant / stall / market name",
-      "desc": "why it is an institution — its history, signature item, or what locals say about it",
+      "desc": "why it is a genuine institution — its history, signature item, or what makes locals fiercely loyal to it; written with personality, not like a Yelp listing",
       "rating": 4.5,
       "priceRange": "₹200–400 per person",
       "bestTime": "dinner",
@@ -801,14 +821,14 @@ Return ONLY valid JSON (no markdown, no backticks):
     {
       "emoji": "✨",
       "name": "specific named experience",
-      "desc": "why a traveller would regret missing this",
+      "desc": "why a traveller would kick themselves for missing this — be specific, be a little dramatic, be right",
       "rating": 4.8,
       "priceRange": "free",
       "bestTime": "early morning",
       "tags": ["offbeat"]
     }
   ],
-  "tip": "one ultra-specific insider tip — a timing, an off-menu order, a neighbourhood secret. Not generic advice."
+  "tip": "one ultra-specific insider tip delivered with wit — a timing hack, an off-menu order, a neighbourhood secret most tourists miss. Write it like you're urgently texting a friend who is about to make a very avoidable mistake."
 }
 Rules:
 - 5–6 items in dishes, 4–5 in places, 3–4 in experiences
@@ -822,10 +842,23 @@ Rules:
 
     const tasteText = await callGemini({
       messages: [{ role: 'user', content: tastePrompt }],
-      maxTokens: 3500, temperature: 0.1,
+      maxTokens: 3500, temperature: 0.2,
     });
     const data = await parseOrRepair(tasteText, 'local taste');
     console.log(`✅ [LOCAL TASTE] ${data.dishes?.length} dishes, ${data.places?.length} places`);
+
+    // ── Persist to DB (upsert in case of race condition) ──────────
+    try {
+      await db.destinationTaste.upsert({
+        where:  { destination: destKey },
+        create: { destination: destKey, data },
+        update: { data, updatedAt: new Date() },
+      });
+      console.log(`💾 [LOCAL TASTE] Saved to DB: ${destKey}`);
+    } catch (dbErr) {
+      console.warn('⚠️  [LOCAL TASTE] DB write failed (non-fatal):', dbErr.message);
+    }
+
     res.json(data);
 
   } catch (err) {
