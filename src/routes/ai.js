@@ -176,34 +176,60 @@ async function callGemini({ system, messages, maxTokens = 1000, temperature = 0.
   return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
 }
 
-// ── Gemini with Google Search Grounding ─────────────────
-// Uses real-time web search to pull data from TripAdvisor,
-// Lonely Planet, Google Travel, Nomadic Matt, WikiVoyage etc.
-async function callGeminiWithSearch({ prompt, maxTokens = 8000, temperature = 0.3 }) {
-  const res = await fetch(geminiUrl('gemini-3.1-flash-lite'), {
-  
+// ── Serper web search helper ─────────────────────────────
+async function serperSearch(query, numResults = 10) {
+  const res = await fetch('https://google.serper.dev/search', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      tools: [{ google_search: {} }],
-      generationConfig: {
-        maxOutputTokens: maxTokens,
-        temperature,
-      },
-    }),
+    headers: {
+      'Content-Type': 'application/json',
+      'X-API-KEY': process.env.SERPER_API_KEY,
+    },
+    body: JSON.stringify({ q: query, num: numResults, gl: 'in', hl: 'en' }),
+  });
+  const data = await res.json();
+
+  // Extract organic results + knowledge graph if present
+  const results = (data.organic || []).map(r => ({
+    title: r.title,
+    url: r.link,
+    snippet: r.snippet,
+  }));
+
+  const kg = data.knowledgeGraph;
+  const kgText = kg ? `\nKnowledge Graph: ${kg.title} — ${kg.description || ''}\n` : '';
+
+  return {
+    text: kgText + results.map((r, i) => `[${i + 1}] ${r.title}\n${r.snippet}\nSource: ${r.url}`).join('\n\n'),
+    sources: results.slice(0, 8).map(r => ({ title: r.title, url: r.url })),
+  };
+}
+
+// ── Gemini + Serper search (replaces Google grounding) ───
+async function callGeminiWithSearch({ prompt, maxTokens = 8000, temperature = 0.3, searchQuery }) {
+  // Step 1: Get real web results via Serper
+  const query = searchQuery || prompt.slice(0, 200);
+  const { text: searchResults, sources } = await serperSearch(query);
+
+  // Step 2: Pass search results as context to Gemini
+  const augmentedPrompt = `
+You have access to the following real-time web search results. Use them as your primary source of truth.
+
+SEARCH RESULTS:
+${searchResults}
+
+---
+
+Now answer the following using the search results above as context:
+${prompt}
+`;
+
+  const text = await callGemini({
+    messages: [{ role: 'user', content: augmentedPrompt }],
+    maxTokens,
+    temperature,
   });
 
-  // const data = await res.json();
-  // if (data.error) throw new Error(data.error.message || 'Gemini Search error');
-  const data = await res.json();
-    console.log('Grounding raw response:', JSON.stringify(data?.error || 'no error field'));
-    if (data.error) throw new Error(data.error.message || 'Gemini Search error');
-
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-  const groundingMetadata = data.candidates?.[0]?.groundingMetadata || null;
-
-  return { text, groundingMetadata };
+  return { text, groundingMetadata: { groundingChunks: sources.map(s => ({ web: s })) } };
 }
 
 function extractJsonObject(text) {
@@ -330,18 +356,37 @@ Return this as structured data I can use to build an itinerary. Be extremely spe
     let sources = [];
 
     try {
-      const { text, groundingMetadata } = await callGeminiWithSearch({
-        prompt: researchPrompt,
+      const [attractionsSearch, foodSearch] = await Promise.all([
+        serperSearch(`best places to visit hidden gems local experiences ${destination}`),
+        serperSearch(`best food restaurants street food travel tips ${destination}`),
+      ]);
+      const combinedSearch = attractionsSearch.text + '\n\n' + foodSearch.text;
+      const combinedSources = [...attractionsSearch.sources, ...foodSearch.sources];
+
+      const augmentedResearchPrompt = `
+You have access to the following real-time web search results. Use them as your primary source of truth.
+
+SEARCH RESULTS:
+${combinedSearch}
+
+---
+
+Now answer the following using the search results above as context:
+${researchPrompt}
+`;
+      const text = await callGemini({
+        messages: [{ role: 'user', content: augmentedResearchPrompt }],
         maxTokens: 6000,
         temperature: 0.2,
       });
+      const groundingMetadata = { groundingChunks: combinedSources.map(s => ({ web: s })) };
       researchData = text;
 
       // Extract source URLs from grounding metadata
       if (groundingMetadata?.groundingChunks) {
         sources = groundingMetadata.groundingChunks
-          .filter(c => c.web?.uri)
-          .map(c => ({ title: c.web.title || c.web.uri, url: c.web.uri }))
+          .filter(c => c.web?.url)
+          .map(c => ({ title: c.web.title || c.web.url, url: c.web.url }))
           .slice(0, 8);
       }
       } catch (searchErr) {
@@ -471,8 +516,25 @@ Return ONLY valid JSON:
 
     let text;
     try {
-      const result = await callGeminiWithSearch({ prompt, maxTokens: 2000, temperature: 0.3 });
-      text = result.text;
+    const { text: searchResults, sources: tasteSources } = await serperSearch(
+        `best local food dishes restaurants street food experiences ${destination}`
+      );
+      const augmentedTastePrompt = `
+You have access to the following real-time web search results. Use them as your primary source of truth.
+
+SEARCH RESULTS:
+${searchResults}
+
+---
+
+Now answer the following using the search results above as context:
+${prompt}
+`;
+      text = await callGemini({
+        messages: [{ role: 'user', content: augmentedTastePrompt }],
+        maxTokens: 2000,
+        temperature: 0.3,
+      });  
     } catch {
       text = await callGemini({ messages: [{ role: 'user', content: prompt }], maxTokens: 2000 });
     }
