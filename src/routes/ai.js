@@ -460,8 +460,9 @@ ${researchContext}
 RULES:
 - Include every specifically named attraction, restaurant, market, street, neighbourhood, temple, beach, viewpoint, and experience you find.
 - Never merge two different places into one entry.
-- Never invent or hallucinate a place not mentioned in the context.
-- Omit a field if the context does not mention it — do NOT guess.
+- CRITICAL: Only populate a field if the value appears EXPLICITLY in the research context. If the context does not mention opening hours for a place, set "opening_hours" to null. If it does not mention a price, set "entry_fee" and "price_range" to null. Never guess, infer, or use generic defaults — null is always better than a made-up value.
+- Mark each attraction/restaurant with "hours_verified": true if opening hours came from the context, false/omit otherwise.
+- Mark with "price_verified": true if price came from the context, false/omit otherwise.
 
 Return ONLY valid JSON (no markdown, no backticks):
 {
@@ -480,8 +481,10 @@ Return ONLY valid JSON (no markdown, no backticks):
       "name": "exact place name as written in context",
       "type": "temple|museum|market|beach|viewpoint|park|heritage|experience|neighbourhood|street",
       "area": "neighbourhood or district",
-      "opening_hours": "9 AM – 6 PM",
-      "entry_fee": "₹200 or Free",
+      "opening_hours": "9 AM – 6 PM or null if not in context",
+      "hours_verified": true,
+      "entry_fee": "₹200 or Free or null if not in context",
+      "price_verified": true,
       "duration": "1-2 hours",
       "best_for": "one line: what it is famous for",
       "insider_tip": "specific tip tourists miss",
@@ -494,7 +497,10 @@ Return ONLY valid JSON (no markdown, no backticks):
       "type": "street_food|casual|fine_dining|cafe|market|hawker",
       "area": "neighbourhood or district",
       "specialty": "specific dish to order",
-      "price_range": "₹XX–₹XX per person",
+      "price_range": "₹XX–₹XX per person or null if not in context",
+      "price_verified": true,
+      "opening_hours": "hours or null if not in context",
+      "hours_verified": true,
       "best_meal": "breakfast|lunch|dinner|anytime",
       "insider_tip": "what to order, when to go",
       "priority": "must_try|recommended|if_time_permits"
@@ -539,11 +545,12 @@ Extract up to ${maxAttractions} attractions, ${maxRestaurants} restaurants, ${ma
       : researchContext.slice(0, 8000);
 
     // Build readable place pools so the model sees exactly what's available
+    // Also pass verified flags so Phase 3 knows which fields came from real sources
     const attractionPool = (structuredData?.attractions || [])
-      .map(a => `• [${a.area || '?'}] ${a.name} (${a.type}, ${a.duration || '1-2h'}, ${a.entry_fee || '?'})`)
+      .map(a => `• [${a.area || '?'}] ${a.name} (${a.type}, duration: ${a.duration || '1-2h'}, entry: ${a.entry_fee || 'unknown'}, hours: ${a.opening_hours || 'unknown'}, hours_verified: ${a.hours_verified ? 'YES' : 'NO'}, price_verified: ${a.price_verified ? 'YES' : 'NO'})`)
       .join('\n') || '(see research data)';
     const restaurantPool = (structuredData?.restaurants || [])
-      .map(r => `• [${r.area || '?'}] ${r.name} — ${r.specialty || r.type} (${r.best_meal || 'anytime'}, ${r.price_range || '?'})`)
+      .map(r => `• [${r.area || '?'}] ${r.name} — ${r.specialty || r.type} (${r.best_meal || 'anytime'}, price: ${r.price_range || 'unknown'}, hours: ${r.opening_hours || 'unknown'}, hours_verified: ${r.hours_verified ? 'YES' : 'NO'}, price_verified: ${r.price_verified ? 'YES' : 'NO'})`)
       .join('\n') || '(see research data)';
     const experiencePool = (structuredData?.local_experiences || [])
       .map(e => `• ${e.name}: ${e.description || ''}`)
@@ -629,11 +636,12 @@ Every attraction/market/restaurant must pass this check BEFORE you schedule it:
   If a place does NOT fit the timeslot you want, move it to the correct timeslot or swap it for a place that does fit.
   The golden-hour slot (5 PM) is ONLY for: open-air viewpoints, riverwalks, beaches, gardens, neighbourhoods, sunset spots — things with no closing time.
 
-  Defaults when hours unknown: attractions 9 AM–5:30 PM | restaurants 8 AM–10 PM | markets 6 AM–1 PM | beaches/parks all day.
+  VERIFIED vs ESTIMATED hours:
+  • If the pool above says "hours_verified: YES" — use those hours exactly and set "hoursSource": "verified" in the activity JSON.
+  • If it says "hours_verified: NO" or hours are "unknown" — use these safe defaults: attractions 9 AM–5:30 PM | restaurants 8 AM–10 PM | markets 6 AM–1 PM | beaches/parks all day. Set "hoursSource": "estimated".
+  Never pretend estimated hours are verified.
 
-  Put actual hours in the "openingHours" field (e.g. "9 AM – 5 PM").
-  If scheduled within 45 min of opening → note: "Arrive right at opening — it fills up fast."
-  If scheduled within 1 h of latest-safe-start → note: "Head straight in — last entry is 30 min before closing."
+  Put the hours in "openingHours" field. If scheduled within 45 min of opening → note: "Arrive right at opening — it fills up fast." If scheduled within 1 h of latest-safe-start → note: "Head straight in — last entry is 30 min before closing."
 
 ── RULE 7B: PRACTICAL HEADS-UPS ──
 For each activity, populate the "headsUp" field with ONE critical practical note the user needs BEFORE arriving. Choose whichever applies:
@@ -645,7 +653,7 @@ For each activity, populate the "headsUp" field with ONE critical practical note
   • Safety: "Negotiate fare before boarding; metered tuk-tuks are cheaper"
   • Weather: "Outdoor — skip on heavy rain days; check forecast morning of"
   • Best day: "Closed on Mondays" or "Busiest on weekends — go weekday"
-  Omit the field (or set to null) if there is genuinely nothing critical to flag.
+  ONLY include a headsUp if it is grounded in the research context or is a universally known fact for that type of place (e.g. temples require covered shoulders everywhere in Southeast Asia). Do NOT invent specific details like "cash only" unless the context says so. Set to null if nothing is grounded.
 
 ── RULE 8: CLUSTER ──
 Group places in the same neighbourhood on the same day to minimise transit time and fatigue.
@@ -684,6 +692,7 @@ Return ONLY valid JSON, no markdown, no backticks, no comments:
           "energyLevel": "rest",
           "duration": "1 hour",
           "openingHours": "24 hours",
+          "hoursSource": "verified",
           "note": "You've just landed — drop your bags, take a cold shower, and breathe. The city can wait an hour.",
           "headsUp": "Keep your passport handy for check-in; most hotels hold rooms until 2 PM so call ahead if arriving early.",
           "cost": "included in stay",
