@@ -615,13 +615,37 @@ For EVERY activity, compute and output:
   • "travelToNext": how long and how to get to the NEXT activity, e.g. "10 min walk", "20 min tuk-tuk", "5 min taxi" — omit only for the last activity of the day
 End time of activity N must be ≤ start time of activity N+1 minus travelToNext. Never overlap. Always include endTime.
 
-── RULE 7: OPENING HOURS ──
-Use the opening_hours from the research data. NEVER schedule:
-  • A temple/museum before it opens (most open 8–9 AM, not 6 AM)
-  • A restaurant for breakfast if it opens at 11 AM
-  • A market visit after it closes
-If hours are unknown, assume: attractions 9 AM–6 PM, restaurants 8 AM–10 PM, markets 6 AM–2 PM.
-Put the opening hours in the "openingHours" field. If scheduling near opening/closing, warn in the note: "They open at 9 — arrive by 8:50 to beat the queue."
+── RULE 7: OPENING HOURS — STRICT SCHEDULING GATE ──
+Every attraction/market/restaurant must pass this check BEFORE you schedule it:
+
+  LATEST SAFE START = closing_time − duration − 30 min (last-entry buffer)
+
+  Examples:
+    • Place closes 5 PM, visit takes 2 h → latest start = 5:00 PM − 2:00 h − 0:30 = 2:30 PM. NEVER schedule after 2:30 PM.
+    • Place closes 6 PM, visit takes 1 h → latest start = 4:30 PM.
+    • Market closes 2 PM → NEVER in afternoon slot.
+    • Sunrise viewpoint best at 6 AM → schedule at 5:45 AM or note the wake-up.
+
+  If a place does NOT fit the timeslot you want, move it to the correct timeslot or swap it for a place that does fit.
+  The golden-hour slot (5 PM) is ONLY for: open-air viewpoints, riverwalks, beaches, gardens, neighbourhoods, sunset spots — things with no closing time.
+
+  Defaults when hours unknown: attractions 9 AM–5:30 PM | restaurants 8 AM–10 PM | markets 6 AM–1 PM | beaches/parks all day.
+
+  Put actual hours in the "openingHours" field (e.g. "9 AM – 5 PM").
+  If scheduled within 45 min of opening → note: "Arrive right at opening — it fills up fast."
+  If scheduled within 1 h of latest-safe-start → note: "Head straight in — last entry is 30 min before closing."
+
+── RULE 7B: PRACTICAL HEADS-UPS ──
+For each activity, populate the "headsUp" field with ONE critical practical note the user needs BEFORE arriving. Choose whichever applies:
+  • Payment: "Cash only — no cards accepted"
+  • Dress code: "Cover shoulders and knees; scarves available at entrance for ₹20"
+  • Booking: "Reserve online at least a day ahead — walk-ins rarely get in"
+  • Crowds: "Packed 10 AM–2 PM — go early or after 3 PM"
+  • Access: "Shoes off at the entrance — wear slip-ons"
+  • Safety: "Negotiate fare before boarding; metered tuk-tuks are cheaper"
+  • Weather: "Outdoor — skip on heavy rain days; check forecast morning of"
+  • Best day: "Closed on Mondays" or "Busiest on weekends — go weekday"
+  Omit the field (or set to null) if there is genuinely nothing critical to flag.
 
 ── RULE 8: CLUSTER ──
 Group places in the same neighbourhood on the same day to minimise transit time and fatigue.
@@ -661,6 +685,7 @@ Return ONLY valid JSON, no markdown, no backticks, no comments:
           "duration": "1 hour",
           "openingHours": "24 hours",
           "note": "You've just landed — drop your bags, take a cold shower, and breathe. The city can wait an hour.",
+          "headsUp": "Keep your passport handy for check-in; most hotels hold rooms until 2 PM so call ahead if arriving early.",
           "cost": "included in stay",
           "icon": "🏨",
           "mustDo": false,
@@ -781,7 +806,7 @@ Rules:
 - Every entry must be specific, named, and pass the quality bar above
 - Never repeat the same place across sections
 - "rating" is a float 1.0–5.0 based on what the research context suggests about popularity/acclaim; omit if no signal
-- "priceRange" is approximate cost per person for that specific item/place; use local currency symbol
+- "priceRange" is approximate cost per person; ALWAYS append "per person" e.g. "₹80–150 per person" or "free"; use local currency symbol
 - "bestTime" is when to go: e.g. "breakfast", "lunch", "dinner", "early morning", "evening", "anytime", "weekends only"
 - Tags choose from: must-try, must-do, iconic, heritage, scenic, culture, offbeat, hidden-gem, seasonal, local-favourite
 - Use ONLY information grounded in the research context`;
