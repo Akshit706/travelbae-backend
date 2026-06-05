@@ -341,8 +341,11 @@ Return this as structured data I can use to build an itinerary. Be extremely spe
           .map(c => ({ title: c.web.title || c.web.uri, url: c.web.uri }))
           .slice(0, 8);
       }
-    } catch (searchErr) {
+      } catch (searchErr) {
       console.warn('Search grounding failed, falling back to trained knowledge:', searchErr.message);
+      console.warn('Full grounding error:', JSON.stringify(searchErr));
+    // } catch (searchErr) {
+    //   console.warn('Search grounding failed, falling back to trained knowledge:', searchErr.message);
       // Fallback: use Gemini's trained knowledge without grounding
       researchData = await callGemini({
         messages: [{ role: 'user', content: researchPrompt }],
