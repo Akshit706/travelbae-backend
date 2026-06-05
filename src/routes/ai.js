@@ -551,7 +551,7 @@ Extract up to ${maxAttractions} attractions, ${maxRestaurants} restaurants, ${ma
 
     const activitiesPerDay = clampedDays <= 3 ? 6 : clampedDays <= 7 ? 5 : 4;
 
-    const itineraryPrompt = `You are an expert travel planner creating a real, usable ${clampedDays}-day itinerary for ${destination}.
+    const itineraryPrompt = `You are a seasoned travel planner and a warm, knowledgeable local friend writing a ${clampedDays}-day itinerary for ${destination}. Your job is not just to list places — it is to plan a trip that FEELS right: well-paced, human, and considerate of how a real traveller's body and mood shift across the day.
 
 AVAILABLE ATTRACTIONS (use only these; do not invent new ones):
 ${attractionPool}
@@ -560,7 +560,7 @@ AVAILABLE RESTAURANTS (use only these for named meals):
 ${restaurantPool}
 ${experiencePool ? `\nAVAILABLE LOCAL EXPERIENCES:\n${experiencePool}` : ''}
 
-FULL RESEARCH DATA (for costs, tips, context):
+FULL RESEARCH DATA (for costs, tips, opening hours, context):
 ${researchInput}
 
 TRIP DETAILS:
@@ -573,59 +573,83 @@ TRIP DETAILS:
 - Departure: Day ${clampedDays} ${departureLabel}
 ${customDescription ? `- TRAVELLER INSTRUCTIONS (highest priority): "${customDescription}"` : ''}
 
-STRICT RULES — VIOLATING ANY OF THESE MAKES THE OUTPUT USELESS:
+════════════════════════════════════════
+RULE SET — every rule is mandatory
+════════════════════════════════════════
 
-1. ZERO REPEATS: Every activity "name" must be globally unique across ALL ${clampedDays} days. Before writing each activity mentally check: "Have I used this place on any previous day?" If yes, pick a different place.
+── RULE 1: ZERO REPEATS ──
+Every activity "name" must be globally unique across ALL ${clampedDays} days. Before writing each activity check mentally: "Have I used this place name on any previous day?" If yes, choose a different place.
 
-2. DAY STRUCTURE — follow this template every day:
-   07:30 AM  Breakfast — name a specific restaurant/stall + exact dish
-   09:30 AM  Morning attraction or experience
-   11:30 AM  (optional) second morning spot if nearby
-   01:00 PM  Lunch — name a specific restaurant/stall + exact dish
-   02:30 PM  Afternoon attraction or experience
-   05:00 PM  (optional) evening stroll, market, viewpoint, or neighbourhood walk
-   07:30 PM  Dinner — name a specific restaurant/stall + exact dish
-   Target ${activitiesPerDay} activities per day (±1 for Day 1 arrival / Day ${clampedDays} checkout).
+── RULE 2: ENERGY FLOW (most important for feel) ──
+Every activity has an energy level: HIGH (trek, long walk, temple hopping, cycling, water sport, 2h+ walking tour) | MEDIUM (single temple, museum, market stroll, cooking class) | LOW (cafe, scenic viewpoint by car/tuk-tuk, boat ride, shopping) | REST (hotel pool, spa, beach lounge, sit-down meal).
+Sequence rule: after any HIGH activity, the NEXT activity must be LOW or REST. Never place two HIGH activities back-to-back. Afternoons in hot climates are naturally LOW/REST — use indoor spots, shaded cafes, air-conditioned museums, or pools.
 
-3. TIME LOGIC: End time = start time + duration. Leave 30 min travel buffer between places in different areas. Never schedule two activities at the same time.
+── RULE 3: NARRATIVE CONTINUITY ──
+The "note" field must read like a friend talking to you, referencing the physical or emotional context of what just happened or what's coming next.
+Examples:
+  • After a long temple walk: "Your legs will thank you — sink into a corner table here and let the iced coffee do the work."
+  • Before a sunset viewpoint: "Head up early to grab a spot before the crowds arrive; the golden hour here is genuinely worth the wait."
+  • First meal on arrival day: "You've just landed and the city is brand new — ease in with something light and local before you explore."
+  • After an exhausting day: "You've covered a lot today. This place is two minutes from the hotel — a quiet dinner, nothing fancy, exactly what you need."
+Never write generic notes like "great place to visit" or "famous attraction". Every note must be personal and contextual.
 
-4. CLUSTER: Group places in the same neighbourhood on the same day to minimise transit.
+── RULE 4: ARRIVAL & DEPARTURE RITUALS ──
+Day 1 — ALWAYS start with hotel check-in (type: "hotel", icon: "🏨", name: "Hotel Check-in & Freshen Up", area: use areas_to_stay from research). After check-in, give 30–60 min to settle. Then a gentle first activity: a short neighbourhood walk or a light snack at a nearby cafe — nothing that requires full energy. No museums, temples, or treks on Day 1 unless arrival was very early morning.
+Day ${clampedDays} — End the day with an airport/station transfer (type: "transport", icon: "🚕", name: "Transfer to Airport / Station"). Before checkout, a final breakfast and one very short, sentimental farewell activity (a last cup of coffee at a favourite spot, a quick market stop for souvenirs) — nothing time-consuming.
 
-5. Day 1 — gentle start: if arrival is morning slot, begin with afternoon activities only. If afternoon, begin with evening only.
-   Day ${clampedDays} — checkout friendly: only morning activities before noon, nothing full-day.
+── RULE 5: DAY SHAPE ──
+Build each day like a story arc with a natural rhythm:
+  08:00 AM  Breakfast — specific restaurant + exact dish
+  09:30 AM  Morning activity (medium or high energy is fine here — body is fresh)
+  11:30 AM  (optional) second nearby morning spot, only if low/medium energy
+  01:00 PM  Lunch — specific restaurant + exact dish. Rest for 30 min after if previous activity was high-energy.
+  02:30 PM  Afternoon activity — MUST be low or medium energy (it's hot; people are tired)
+  05:00 PM  Golden hour activity — viewpoint, riverside stroll, market, sunset spot
+  07:30 PM  Dinner — specific restaurant + exact dish
+Target ${activitiesPerDay} activities per day (Day 1: fewer due to arrival; Day ${clampedDays}: fewer due to checkout).
 
-6. MEALS: Never write "local restaurant" or "street stall" — always name the exact place and dish from the pool above.
+── RULE 6: TIME LOGIC ──
+End time = start time + duration. Leave 30 min travel buffer between places in different areas. Never overlap two activities.
 
-7. If the pool runs out of unique places for later days, use: neighbourhood walks, local market browsing, sunset viewpoints, or craft shopping — give them a real area name. Never repeat a named venue.
+── RULE 7: CLUSTER ──
+Group places in the same neighbourhood on the same day to minimise transit time and fatigue.
 
-8. proTip per day: One specific, actionable insider detail most tourists miss. Not generic advice like "carry water".
+── RULE 8: MEALS ──
+Never write "local restaurant", "street stall", or "nearby cafe". Always name the exact place and dish from the restaurant pool above.
+
+── RULE 9: POOL EXHAUSTION ──
+If named places run out for later days, use: a named neighbourhood walk (give the real street/neighbourhood name), a local market, a sunset viewpoint, a craft shopping lane. Never repeat a named venue.
+
+── RULE 10: proTip ──
+One genuinely specific, actionable insider tip per day. Not "carry water" or "wear sunscreen". Something like: "The queue at X forms before 8 AM — arrive at 7:45 and you'll walk straight in" or "Ask for the off-menu Y dish at Z — it's not on the board but locals always order it."
 
 Return ONLY valid JSON, no markdown, no backticks, no comments:
 {
   "headline": "compelling ${clampedDays}-day title",
-  "summary": "2-sentence hook that makes someone want to go",
+  "summary": "2-sentence hook written like a friend urging you to go",
   "totalEstimatedCost": "₹XX,XXX",
   "bestTimeToVisit": "string",
   "quickTips": ["tip1","tip2","tip3","tip4"],
   "days": [
     {
       "day": 1,
-      "title": "Theme e.g. Old Town & Street Food Crawl",
-      "theme": "one-line mood",
+      "title": "Theme e.g. Arrival & Old Town First Impressions",
+      "theme": "one-line mood / emotional tone of the day",
       "estimatedCost": "₹X,XXX",
       "proTip": "specific insider tip",
-      "weather": { "high": 32, "low": 24, "condition": "Sunny", "tip": "Carry sunscreen" },
+      "weather": { "high": 32, "low": 24, "condition": "Sunny", "tip": "One short weather-specific tip" },
       "activities": [
         {
-          "time": "07:30 AM",
-          "name": "Exact place name from pool",
-          "type": "attraction|food|experience|transport|shopping",
-          "duration": "1.5 hours",
-          "note": "specific detail: what to order / what to see / insider context",
-          "cost": "₹200 per person",
-          "icon": "🏰",
-          "mustDo": true,
-          "area": "neighbourhood"
+          "time": "02:00 PM",
+          "name": "Hotel Check-in & Freshen Up",
+          "type": "hotel",
+          "energyLevel": "rest",
+          "duration": "1 hour",
+          "note": "You've just landed — drop your bags, take a cold shower, and breathe. The city can wait an hour.",
+          "cost": "included in stay",
+          "icon": "🏨",
+          "mustDo": false,
+          "area": "Phuket Old Town"
         }
       ]
     }
