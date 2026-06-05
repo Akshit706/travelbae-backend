@@ -4,7 +4,7 @@
 // → Gemini structured extraction → itinerary/local-taste generation
 //
 // POST /ai/chat          — trip chatbot
-// POST /ai/itinerary     — research-backed itinerary (2-phase)
+// POST /ai/itinerary     — research-backed itinerary (3-phase)
 // POST /ai/local-taste   — local food + places + experiences
 // GET  /ai/photos        — Wikimedia place photos
 // ═══════════════════════════════════════════════════════════════════
@@ -18,50 +18,73 @@ router.use(authenticate);
 // ─────────────────────────────────────────────────────────────────
 // CONFIG
 // ─────────────────────────────────────────────────────────────────
-const GEMINI_MODEL = 'gemini-2.0-flash';
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`;
+// Model cascade: lite first (highest free RPM), fall back on quota
+const GEMINI_MODELS = [
+  'gemini-2.0-flash-lite',
+  'gemini-1.5-flash',
+  'gemini-1.5-flash-8b',
+];
 const SERPER_URL = 'https://google.serper.dev/search';
+const FETCH_TOP_N = 3;       // editorial pages to deep-fetch
+const MIN_GAP_MS  = 2000;    // min ms between Gemini calls (burst guard)
 
-// How many top Serper results to deep-fetch for page content
-const FETCH_TOP_N = 3;
-
-// Domains we skip fetching (aggregators, video, social — snippets only)
+// Domains we skip fetching (login-walled, video, social)
 const SKIP_FETCH_DOMAINS = [
   'youtube.com', 'facebook.com', 'instagram.com', 'twitter.com',
-  'reddit.com', 'tripadvisor.com', 'tripadvisor.in', 'makemytrip.com',
-  'klook.com', 'viator.com', 'getyourguide.com', 'booking.com',
-  'agoda.com', 'expedia.com',
+  'reddit.com',  'tripadvisor.com', 'tripadvisor.in', 'makemytrip.com',
+  'klook.com',   'viator.com',      'getyourguide.com', 'booking.com',
+  'agoda.com',   'expedia.com',
 ];
 
-// Domains we prefer fetching (high-quality editorial)
+// Domains worth fetching (high-quality editorial travel content)
 const PREFER_FETCH_DOMAINS = [
-  'lonelyplanet.com', 'nomadicmatt.com', 'wikivoyage.org',
-  'condénast.com', 'travelandleisure.com', 'timeout.com',
-  'eatingthaifood.com', 'midnightblueelephant.com',
-  'notquitenigella.com', 'marionskitchen.com',
-  'guide.michelin.com', 'breathedreamgo.com',
-  'passionforhospitality.net',
+  'lonelyplanet.com', 'nomadicmatt.com',   'wikivoyage.org',
+  'travelandleisure.com', 'timeout.com',   'cntraveler.com',
+  'eatingthaifood.com',   'marionskitchen.com',
+  'midnightblueelephant.com', 'notquitenigella.com',
+  'guide.michelin.com',   'breathedreamgo.com',
+  'passionforhospitality.net', 'willflyforfood.net',
+  'budgettraveller.org',  'akasaair.com',
 ];
 
 // ─────────────────────────────────────────────────────────────────
-// GEMINI CORE CALLER
+// GLOBAL GEMINI QUEUE — serialize all calls, prevent burst 429s
 // ─────────────────────────────────────────────────────────────────
-async function callGemini({ system, messages, maxTokens = 1000, temperature = 0.7 }) {
-  const contents = [];
+let _geminiQueue = Promise.resolve();
 
-  if (system) {
-    contents.push({ role: 'user',  parts: [{ text: `[System instructions]: ${system}` }] });
-    contents.push({ role: 'model', parts: [{ text: 'Understood. I will follow those instructions.' }] });
-  }
+function enqueueGemini(fn) {
+  const next = _geminiQueue.then(async () => {
+    const result = await fn();
+    await new Promise(r => setTimeout(r, MIN_GAP_MS));
+    return result;
+  });
+  _geminiQueue = next.catch(() => {}); // don't let errors block the queue
+  return next;
+}
 
-  for (const msg of messages) {
-    contents.push({
-      role: msg.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: msg.content }],
-    });
-  }
+// ─────────────────────────────────────────────────────────────────
+// GEMINI CALLER — retry with backoff + model fallback
+// ─────────────────────────────────────────────────────────────────
+function geminiUrl(model) {
+  return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`;
+}
 
-  const res = await fetch(GEMINI_URL, {
+function isRateLimit(data) {
+  return (
+    data?.error?.code === 429 ||
+    (data?.error?.message || '').toLowerCase().includes('quota') ||
+    (data?.error?.message || '').toLowerCase().includes('rate limit')
+  );
+}
+
+function parseRetryDelay(msg) {
+  const m = String(msg || '').match(/retry in ([\d.]+)s/i);
+  const secs = m ? parseFloat(m[1]) : 15;
+  return Math.min(Math.max(secs, 5), 60) * 1000;
+}
+
+async function callGeminiRaw(model, contents, maxTokens, temperature) {
+  const res = await fetch(geminiUrl(model), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -69,15 +92,63 @@ async function callGemini({ system, messages, maxTokens = 1000, temperature = 0.
       generationConfig: { maxOutputTokens: maxTokens, temperature },
     }),
   });
+  return res.json();
+}
 
-  const data = await res.json();
-  if (data.error) throw new Error(`Gemini error: ${data.error.message}`);
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+async function callGemini({ system, messages, maxTokens = 1000, temperature = 0.7 }) {
+  return enqueueGemini(async () => {
+    // Build contents array once
+    const contents = [];
+    if (system) {
+      contents.push({ role: 'user',  parts: [{ text: `[System instructions]: ${system}` }] });
+      contents.push({ role: 'model', parts: [{ text: 'Understood.' }] });
+    }
+    for (const msg of messages) {
+      contents.push({
+        role: msg.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: msg.content }],
+      });
+    }
+
+    for (let mi = 0; mi < GEMINI_MODELS.length; mi++) {
+      const model = GEMINI_MODELS[mi];
+      let lastErr = null;
+
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const data = await callGeminiRaw(model, contents, maxTokens, temperature);
+
+        if (!data.error) {
+          if (mi > 0 || attempt > 0) {
+            console.log(`✅ [GEMINI] model=${model} attempt=${attempt + 1}`);
+          }
+          return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        }
+
+        lastErr = data.error.message;
+
+        if (isRateLimit(data)) {
+          const delay = parseRetryDelay(lastErr);
+          console.warn(`⏳ [GEMINI] Rate limit on ${model} attempt ${attempt + 1}/3 — waiting ${(delay/1000).toFixed(1)}s`);
+          await new Promise(r => setTimeout(r, delay));
+          continue; // retry same model
+        }
+
+        // Non-rate error — skip straight to next model
+        console.warn(`⚠️ [GEMINI] Error on ${model}: ${lastErr}`);
+        break;
+      }
+
+      if (mi < GEMINI_MODELS.length - 1) {
+        console.warn(`🔄 [GEMINI] Falling back: ${model} → ${GEMINI_MODELS[mi + 1]}`);
+      } else {
+        throw new Error(`Gemini error (all models exhausted): ${lastErr}`);
+      }
+    }
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────
-// SERPER — MULTI-QUERY SEARCH
-// fires multiple targeted queries in parallel, deduplicates results
+// SERPER — multi-query search, deduplicated
 // ─────────────────────────────────────────────────────────────────
 async function serperMultiSearch(queries, numPerQuery = 8) {
   console.log(`🔍 [SERPER] Firing ${queries.length} searches:`, queries);
@@ -102,13 +173,12 @@ async function serperMultiSearch(queries, numPerQuery = 8) {
     if (outcome.status !== 'fulfilled') continue;
     const data = outcome.value;
 
-    // Knowledge graph (only once, from first result with one)
     if (data.knowledgeGraph && !seen.has('__kg__')) {
       seen.add('__kg__');
       const kg = data.knowledgeGraph;
       allResults.push({
         type: 'knowledge_graph',
-        title: kg.title,
+        title: kg.title || '',
         description: kg.description || '',
         attributes: kg.attributes || {},
         url: kg.website || '',
@@ -133,33 +203,27 @@ async function serperMultiSearch(queries, numPerQuery = 8) {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// WEB FETCH — pull actual page content from top editorial sources
+// WEB FETCH — pull actual page content from editorial sources
 // ─────────────────────────────────────────────────────────────────
 function shouldFetch(url) {
   if (!url) return false;
   try {
     const host = new URL(url).hostname.replace('www.', '');
-    if (SKIP_FETCH_DOMAINS.some(d => host.includes(d))) return false;
-    return true;
-  } catch {
-    return false;
-  }
+    return !SKIP_FETCH_DOMAINS.some(d => host.includes(d));
+  } catch { return false; }
 }
 
 function preferScore(url) {
   try {
     const host = new URL(url).hostname.replace('www.', '');
     return PREFER_FETCH_DOMAINS.some(d => host.includes(d)) ? 1 : 0;
-  } catch {
-    return 0;
-  }
+  } catch { return 0; }
 }
 
 async function fetchPageContent(url, maxChars = 4000) {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
-
     const res = await fetch(url, {
       signal: controller.signal,
       headers: {
@@ -168,12 +232,9 @@ async function fetchPageContent(url, maxChars = 4000) {
       },
     });
     clearTimeout(timeout);
-
     if (!res.ok) return null;
     const html = await res.text();
-
-    // Strip tags, scripts, styles — extract readable text
-    const text = html
+    return html
       .replace(/<script[\s\S]*?<\/script>/gi, '')
       .replace(/<style[\s\S]*?<\/style>/gi, '')
       .replace(/<nav[\s\S]*?<\/nav>/gi, '')
@@ -186,62 +247,43 @@ async function fetchPageContent(url, maxChars = 4000) {
       .replace(/&gt;/g, '>')
       .replace(/\s{3,}/g, '\n\n')
       .trim()
-      .slice(0, maxChars);
-
-    return text || null;
-  } catch {
-    return null;
-  }
+      .slice(0, maxChars) || null;
+  } catch { return null; }
 }
 
 // ─────────────────────────────────────────────────────────────────
-// RESEARCH ASSEMBLER
-// Combines snippets + fetched page content into rich context
+// RESEARCH ASSEMBLER — snippets + fetched page content
 // ─────────────────────────────────────────────────────────────────
-async function buildResearchContext(searchResults, destination) {
-  // Sort: prefer editorial sources first
+async function buildResearchContext(searchResults) {
   const organic = searchResults.filter(r => r.type === 'organic');
-  const sorted = [...organic].sort((a, b) => preferScore(b.url) - preferScore(a.url));
-
-  // Pick top N fetchable URLs
-  const toFetch = sorted
-    .filter(r => shouldFetch(r.url))
-    .slice(0, FETCH_TOP_N);
+  const sorted  = [...organic].sort((a, b) => preferScore(b.url) - preferScore(a.url));
+  const toFetch = sorted.filter(r => shouldFetch(r.url)).slice(0, FETCH_TOP_N);
 
   console.log(`🌐 [FETCH] Fetching ${toFetch.length} pages:`, toFetch.map(r => r.url));
+  const fetched = await Promise.allSettled(toFetch.map(r => fetchPageContent(r.url)));
 
-  const fetched = await Promise.allSettled(
-    toFetch.map(r => fetchPageContent(r.url))
-  );
-
-  // Build context string
   let context = '';
 
-  // Knowledge graph first
   const kg = searchResults.find(r => r.type === 'knowledge_graph');
   if (kg) {
-    context += `## About ${kg.title}\n${kg.description}\n`;
-    if (Object.keys(kg.attributes).length) {
-      context += Object.entries(kg.attributes).map(([k, v]) => `${k}: ${v}`).join('\n') + '\n\n';
-    }
+    context += `## Overview: ${kg.title}\n${kg.description}\n`;
+    const attrs = Object.entries(kg.attributes || {});
+    if (attrs.length) context += attrs.map(([k, v]) => `${k}: ${v}`).join('\n') + '\n\n';
   }
 
-  // Full page content from editorial sources
   context += `## Detailed Research (from travel publications)\n`;
   let fetchedCount = 0;
   for (let i = 0; i < toFetch.length; i++) {
-    const result = fetched[i];
-    const source = toFetch[i];
-    if (result.status === 'fulfilled' && result.value) {
+    const r = fetched[i];
+    if (r.status === 'fulfilled' && r.value) {
       fetchedCount++;
-      const host = new URL(source.url).hostname.replace('www.', '');
-      context += `\n### Source: ${host}\nURL: ${source.url}\n${result.value}\n`;
+      const host = new URL(toFetch[i].url).hostname.replace('www.', '');
+      context += `\n### ${host}\nURL: ${toFetch[i].url}\n${r.value}\n`;
     }
   }
-  console.log(`✅ [FETCH] Successfully fetched ${fetchedCount}/${toFetch.length} pages`);
+  console.log(`✅ [FETCH] ${fetchedCount}/${toFetch.length} pages fetched`);
 
-  // All snippets as supplementary
-  context += `\n## Search Result Snippets (supplementary)\n`;
+  context += `\n## Snippets (supplementary)\n`;
   for (const r of organic.slice(0, 15)) {
     const host = (() => { try { return new URL(r.url).hostname.replace('www.', ''); } catch { return r.url; } })();
     context += `\n[${host}] ${r.title}\n${r.snippet}`;
@@ -249,8 +291,11 @@ async function buildResearchContext(searchResults, destination) {
     context += '\n';
   }
 
-  console.log(`📄 [CONTEXT] Total research context: ${context.length} chars`);
-  return { context, sources: organic.slice(0, 10).map(r => ({ title: r.title, url: r.url })) };
+  console.log(`📄 [CONTEXT] ${context.length} chars total`);
+  return {
+    context,
+    sources: organic.slice(0, 10).map(r => ({ title: r.title, url: r.url })),
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -259,15 +304,14 @@ async function buildResearchContext(searchResults, destination) {
 function extractJson(text) {
   const clean = String(text || '').replace(/```json|```/gi, '').trim();
   const start = clean.indexOf('{');
-  if (start === -1) throw new Error('No JSON found');
-
+  if (start === -1) throw new Error('No JSON object found');
   let depth = 0, inStr = false, esc = false;
   for (let i = start; i < clean.length; i++) {
     const ch = clean[i];
     if (inStr) {
-      if (esc) { esc = false; continue; }
-      if (ch === '\\') { esc = true; continue; }
-      if (ch === '"') inStr = false;
+      if (esc)        { esc = false; continue; }
+      if (ch === '\\') { esc = true;  continue; }
+      if (ch === '"')   { inStr = false; continue; }
       continue;
     }
     if (ch === '"') { inStr = true; continue; }
@@ -276,7 +320,7 @@ function extractJson(text) {
   }
   const end = clean.lastIndexOf('}');
   if (end > start) return clean.slice(start, end + 1);
-  throw new Error('Incomplete JSON');
+  throw new Error('Incomplete JSON object');
 }
 
 function parseJson(text) {
@@ -290,7 +334,7 @@ async function parseOrRepair(rawText, shape) {
   try {
     return parseJson(rawText);
   } catch (firstErr) {
-    console.warn(`⚠️ [JSON] Parse failed, attempting Gemini repair for: ${shape}`);
+    console.warn(`⚠️ [JSON] Parse failed for ${shape}, attempting repair`);
     try {
       const repaired = await callGemini({
         messages: [{
@@ -327,9 +371,9 @@ router.post('/chat', async (req, res) => {
 // ─────────────────────────────────────────────────────────────────
 // ITINERARY — 3-phase pipeline
 //
-// Phase 1: Multi-query Serper → web_fetch editorial sources → rich context
-// Phase 2: Gemini structured extraction → clean JSON research data
-// Phase 3: Gemini itinerary builder → final JSON itinerary
+// Phase 1 : Serper (4 queries) + web-fetch editorial pages → rich context
+// Phase 2 : Gemini structured extraction (temp=0) → typed JSON data
+// Phase 3 : Gemini itinerary builder (temp=0.3) → final itinerary JSON
 // ─────────────────────────────────────────────────────────────────
 router.post('/itinerary', async (req, res) => {
   const {
@@ -343,7 +387,7 @@ router.post('/itinerary', async (req, res) => {
   }
 
   const budgetPerDay = budget ? Math.round(budget / days) : null;
-  const interestStr = interests.length
+  const interestStr  = interests.length
     ? interests.map(i => i.replace(/^[^\w]+/, '').trim()).join(', ')
     : 'sightseeing, food, culture, local experiences';
 
@@ -352,24 +396,22 @@ router.post('/itinerary', async (req, res) => {
   console.log(`${'═'.repeat(60)}`);
 
   try {
-    // ── PHASE 1: RESEARCH ──────────────────────────────────────────
+    // ── PHASE 1: RESEARCH ────────────────────────────────────────
     console.log('\n📡 PHASE 1: Research');
 
-    // Targeted queries — specific beats generic
-    const searchQueries = [
+    const searchResults = await serperMultiSearch([
       `${destination} top attractions things to do travel guide`,
       `${destination} best restaurants local food street food where to eat`,
       `${destination} hidden gems offbeat local tips travel`,
       `${destination} travel tips practical guide transport budget`,
-    ];
+    ], 8);
 
-    const searchResults = await serperMultiSearch(searchQueries, 8);
-    const { context: researchContext, sources } = await buildResearchContext(searchResults, destination);
+    const { context: researchContext, sources } = await buildResearchContext(searchResults);
 
-    // ── PHASE 2: STRUCTURED EXTRACTION ────────────────────────────
+    // ── PHASE 2: STRUCTURED EXTRACTION ──────────────────────────
     console.log('\n🧠 PHASE 2: Structured extraction');
 
-    const extractionPrompt = `You are a travel data analyst. Extract structured, factual travel information from the research context below.
+    const extractionPrompt = `You are a travel data analyst. Extract structured travel information from the research context below.
 
 DESTINATION: ${destination}
 ${budget ? `BUDGET: ₹${budget} total (₹${budgetPerDay}/day) for ${people} person(s)` : ''}
@@ -378,11 +420,11 @@ INTERESTS: ${interestStr}
 RESEARCH CONTEXT:
 ${researchContext}
 
-Extract and return ONLY valid JSON (no markdown, no backticks):
+Return ONLY valid JSON (no markdown, no backticks). Use ONLY information from the context. Omit any field you cannot find — never invent data:
 {
-  "destination_overview": "2-3 sentence overview of the destination",
+  "destination_overview": "2-3 sentence overview",
   "best_time_to_visit": "specific months and why",
-  "practical_tips": ["tip1", "tip2", "tip3", "tip4", "tip5"],
+  "practical_tips": ["tip1","tip2","tip3","tip4","tip5"],
   "getting_around": "transport options and costs",
   "average_costs": {
     "budget_meal": "₹XX",
@@ -395,18 +437,18 @@ Extract and return ONLY valid JSON (no markdown, no backticks):
       "name": "exact place name",
       "type": "temple|museum|market|beach|viewpoint|park|heritage|experience",
       "rating": "4.5",
-      "area": "neighbourhood or area",
+      "area": "neighbourhood",
       "opening_hours": "9 AM – 6 PM",
       "entry_fee": "₹200 or Free",
       "duration": "1-2 hours",
-      "best_for": "what it's famous for",
+      "best_for": "what it is famous for",
       "insider_tip": "specific tip tourists miss",
       "priority": "must_do|recommended|if_time_permits"
     }
   ],
   "restaurants": [
     {
-      "name": "exact restaurant/stall name",
+      "name": "exact name",
       "type": "street_food|casual|fine_dining|cafe|market",
       "area": "neighbourhood",
       "specialty": "specific dish to order",
@@ -425,42 +467,42 @@ Extract and return ONLY valid JSON (no markdown, no backticks):
       "insider_tip": "specific detail"
     }
   ],
-  "areas_to_stay": ["area1 — why", "area2 — why"],
-  "what_to_avoid": ["avoid1", "avoid2", "avoid3"]
+  "areas_to_stay": ["area1 — why","area2 — why"],
+  "what_to_avoid": ["avoid1","avoid2","avoid3"]
 }
 
-Return maximum 20 attractions, 12 restaurants, 6 local_experiences.
-Use ONLY information from the research context. If a detail is not in the context, omit that field rather than guessing.`;
+Max: 20 attractions, 12 restaurants, 6 local_experiences.`;
 
     const extractionText = await callGemini({
       messages: [{ role: 'user', content: extractionPrompt }],
       maxTokens: 6000,
-      temperature: 0, // Zero temperature — pure extraction, no hallucination
+      temperature: 0,
     });
 
-    let structuredData;
+    let structuredData = null;
     try {
       structuredData = await parseOrRepair(extractionText, 'structured travel data');
-      console.log(`✅ [PHASE 2] Extracted: ${structuredData.attractions?.length || 0} attractions, ${structuredData.restaurants?.length || 0} restaurants`);
+      console.log(`✅ [PHASE 2] ${structuredData.attractions?.length || 0} attractions, ${structuredData.restaurants?.length || 0} restaurants`);
     } catch (e) {
-      console.warn('⚠️ [PHASE 2] Extraction parse failed, using raw context for Phase 3');
-      structuredData = null;
+      console.warn('⚠️ [PHASE 2] Parse failed — Phase 3 will use raw context');
     }
 
-    // ── PHASE 3: ITINERARY BUILD ───────────────────────────────────
+    // ── PHASE 3: ITINERARY BUILD ────────────────────────────────
     console.log('\n🗓️  PHASE 3: Itinerary build');
 
-    const researchInput = structuredData
+    const SLOT_LABELS = {
+      night: '12AM–6AM', morning: '6AM–12PM',
+      afternoon: '12PM–6PM', evening: '6PM–12AM',
+    };
+    const arrivalLabel   = SLOT_LABELS[arrivalSlot]   || '6AM–12PM';
+    const departureLabel = SLOT_LABELS[departureSlot] || '6AM–12PM';
+    const researchInput  = structuredData
       ? JSON.stringify(structuredData, null, 2)
       : researchContext.slice(0, 8000);
 
-    const SLOT_LABELS = { night: '12AM–6AM', morning: '6AM–12PM', afternoon: '12PM–6PM', evening: '6PM–12AM' };
-    const arrivalLabel = arrivalSlot ? SLOT_LABELS[arrivalSlot] : 'morning';
-    const departureLabel = departureSlot ? SLOT_LABELS[departureSlot] : 'morning';
+    const itineraryPrompt = `You are an expert travel planner. Build a PERFECT ${days}-day itinerary for ${destination} using ONLY the structured research data below. Do not invent places not in the data.
 
-    const itineraryPrompt = `You are an expert travel planner. Build a PERFECT ${days}-day itinerary for ${destination} using ONLY the structured research data below. Do not invent places not mentioned in the data.
-
-STRUCTURED RESEARCH DATA:
+RESEARCH DATA:
 ${researchInput}
 
 TRIP DETAILS:
@@ -469,34 +511,33 @@ TRIP DETAILS:
 - People: ${people}
 - Budget: ${budget ? `₹${budget} total (₹${budgetPerDay}/day for the group)` : 'flexible'}
 - Interests: ${interestStr}
-- Arrival slot: Day 1 ${arrivalLabel}
-- Departure slot: Day ${days} ${departureLabel}
-${customDescription ? `\n- TRAVELLER'S SPECIAL INSTRUCTIONS (highest priority, override defaults if needed):\n  "${customDescription}"` : ''}
+- Arrival: Day 1 ${arrivalLabel}
+- Departure: Day ${days} ${departureLabel}
+${customDescription ? `- TRAVELLER INSTRUCTIONS (highest priority): "${customDescription}"` : ''}
 
-PLANNING RULES:
-1. GEOGRAPHY FIRST — cluster nearby places on the same day, minimise backtracking
-2. MORNING = popular/crowded spots (beat the queues); AFTERNOON = leisurely; EVENING = food, markets, sunset
-3. Day 1: arrival + gentle orientation + nearby dinner. Day ${days}: checkout-friendly, near transport hub
-4. Every meal slot (breakfast, lunch, dinner) must name a specific restaurant/stall from the research + what to order
-5. At least one "local experience" or hidden gem per day
-6. Respect the budget — note costs per activity, skip expensive options if budget is tight
-7. Add a "pro_tip" per day that most tourists miss
-8. Weather note per day if data is available
+RULES:
+1. Cluster nearby places on the same day — minimise backtracking
+2. Mornings: popular/crowded spots. Afternoons: leisurely. Evenings: food, markets, sunset
+3. Day 1: gentle arrival + orientation. Day ${days}: checkout-friendly activities near transport
+4. Every meal slot must name a specific restaurant/stall + what to order
+5. At least one local/hidden-gem experience per day
+6. Stay within budget if provided; note approximate costs
+7. Add a "proTip" per day (something most tourists miss)
 
 Return ONLY valid JSON, no markdown, no backticks, no comments:
 {
   "headline": "compelling ${days}-day title",
-  "summary": "2-sentence hook summary of what makes this itinerary special",
+  "summary": "2-sentence hook",
   "totalEstimatedCost": "₹XX,XXX",
   "bestTimeToVisit": "string",
-  "quickTips": ["actionable tip 1", "tip 2", "tip 3", "tip 4"],
+  "quickTips": ["tip1","tip2","tip3","tip4"],
   "days": [
     {
       "day": 1,
-      "title": "Theme title e.g. Old City & Street Food Trail",
+      "title": "Theme e.g. Old City & Street Food Trail",
       "theme": "one-line mood",
       "estimatedCost": "₹X,XXX",
-      "proTip": "one insider tip most tourists miss",
+      "proTip": "insider tip most tourists miss",
       "weather": { "high": 32, "low": 24, "condition": "Sunny", "tip": "Carry water" },
       "activities": [
         {
@@ -504,7 +545,7 @@ Return ONLY valid JSON, no markdown, no backticks, no comments:
           "name": "Exact place name from research",
           "type": "attraction|food|experience|transport|hotel|shopping",
           "duration": "1.5 hours",
-          "note": "specific insider detail — what to see, what to order, hidden detail",
+          "note": "specific insider detail",
           "cost": "₹200 per person",
           "rating": "4.7 ⭐",
           "icon": "🏰",
@@ -519,25 +560,25 @@ Return ONLY valid JSON, no markdown, no backticks, no comments:
     const itineraryText = await callGemini({
       messages: [{ role: 'user', content: itineraryPrompt }],
       maxTokens: 8000,
-      temperature: 0.3, // Low-ish — creative but grounded
+      temperature: 0.3,
     });
 
-    console.log(`✅ [PHASE 3] Itinerary text length: ${itineraryText.length} chars`);
+    console.log(`✅ [PHASE 3] ${itineraryText.length} chars`);
 
     const itinerary = await parseOrRepair(itineraryText, 'itinerary');
-
-    console.log(`🎉 [ITINERARY] Done — ${itinerary.days?.length || 0} days, ${itinerary.days?.reduce((s, d) => s + (d.activities?.length || 0), 0) || 0} activities`);
+    const actCount  = itinerary.days?.reduce((s, d) => s + (d.activities?.length || 0), 0) || 0;
+    console.log(`🎉 [ITINERARY] Done — ${itinerary.days?.length || 0} days, ${actCount} activities`);
 
     res.json({ itinerary, sources });
 
   } catch (err) {
-    console.error('❌ Itinerary error:', err.message, err.stack);
+    console.error('❌ Itinerary error:', err.message);
     res.status(500).json({ error: 'Could not generate itinerary. Please try again.' });
   }
 });
 
 // ─────────────────────────────────────────────────────────────────
-// LOCAL TASTE — 2-phase: search+fetch → extract → structured output
+// LOCAL TASTE
 // ─────────────────────────────────────────────────────────────────
 router.post('/local-taste', async (req, res) => {
   const { destination } = req.body;
@@ -546,56 +587,39 @@ router.post('/local-taste', async (req, res) => {
   console.log(`\n🍜 LOCAL TASTE: ${destination}`);
 
   try {
-    // Phase 1: Targeted food searches
     const searchResults = await serperMultiSearch([
       `${destination} must eat local food dishes authentic cuisine`,
       `${destination} best street food stalls local restaurants hidden gems`,
     ], 8);
 
-    const { context } = await buildResearchContext(searchResults, destination);
+    const { context } = await buildResearchContext(searchResults);
 
-    // Phase 2: Extract structured taste guide
-    const tastePrompt = `You are a food travel writer. Extract a local taste guide for "${destination}" from the research context below.
+    const tastePrompt = `You are a food travel writer. Extract a local taste guide for "${destination}" using ONLY the research context below.
 
 RESEARCH CONTEXT:
 ${context}
 
-Return ONLY valid JSON (no markdown, no backticks). Use ONLY information from the context:
+Return ONLY valid JSON (no markdown, no backticks):
 {
   "headline": "${destination} — Local Flavours",
-  "tagline": "compelling one-liner about this destination's food identity",
+  "tagline": "one-liner about this destination's food identity",
   "dishes": [
-    {
-      "emoji": "🍜",
-      "name": "exact dish name",
-      "desc": "where specifically to get it and one detail that makes it special",
-      "tags": ["must-try"]
-    }
+    { "emoji": "🍜", "name": "exact dish name", "desc": "where to get it and what makes it special", "tags": ["must-try"] }
   ],
   "places": [
-    {
-      "emoji": "📍",
-      "name": "exact place name",
-      "desc": "what makes it special and unmissable",
-      "tags": ["iconic"]
-    }
+    { "emoji": "📍", "name": "exact place name", "desc": "what makes it unmissable", "tags": ["iconic"] }
   ],
   "experiences": [
-    {
-      "emoji": "✨",
-      "name": "experience name",
-      "desc": "why locals love it, what to expect",
-      "tags": ["offbeat"]
-    }
+    { "emoji": "✨", "name": "experience name", "desc": "why locals love it", "tags": ["offbeat"] }
   ],
-  "tip": "single best insider tip only a local or seasoned traveller would know"
+  "tip": "single best insider tip a local would give"
 }
 
 Rules:
-- 4 items in each array
-- Every item must be specific and named — no generic entries like "local restaurants"
-- Tags per item: pick from must-try, must-do, iconic, heritage, scenic, culture, offbeat, hidden-gem, seasonal
-- Use ONLY information from the context above`;
+- Exactly 4 items in each array
+- Every entry must be specific and named — no generics like "local restaurants"
+- Tags: pick from must-try, must-do, iconic, heritage, scenic, culture, offbeat, hidden-gem, seasonal
+- Use ONLY information from the context`;
 
     const tasteText = await callGemini({
       messages: [{ role: 'user', content: tastePrompt }],
@@ -604,9 +628,9 @@ Rules:
     });
 
     const data = await parseOrRepair(tasteText, 'local taste');
-    console.log(`✅ [LOCAL TASTE] Done — ${data.dishes?.length} dishes, ${data.places?.length} places`);
-
+    console.log(`✅ [LOCAL TASTE] ${data.dishes?.length} dishes, ${data.places?.length} places`);
     res.json(data);
+
   } catch (err) {
     console.error('❌ Local taste error:', err.message);
     res.status(500).json({ error: 'Could not fetch local taste data.' });
@@ -614,10 +638,10 @@ Rules:
 });
 
 // ─────────────────────────────────────────────────────────────────
-// PHOTOS — Wikimedia Commons with caching
+// PHOTOS — Wikimedia Commons with 1-hour cache
 // ─────────────────────────────────────────────────────────────────
-const photoCache = new Map();
-const PHOTO_NOISE_RE = /flag|logo|map|seal|coat|icon|emblem|portrait|locator|location|blank|outline|stub/i;
+const photoCache  = new Map();
+const PHOTO_NOISE = /flag|logo|map|seal|coat|icon|emblem|portrait|locator|location|blank|outline|stub/i;
 
 async function commonsSearch(q, limit = 15) {
   const url =
@@ -627,9 +651,7 @@ async function commonsSearch(q, limit = 15) {
     `&prop=imageinfo&iiprop=url|size&iiurlwidth=900` +
     `&format=json&origin=*`;
 
-  const r = await fetch(url, {
-    headers: { 'User-Agent': 'TravelBae/1.0 (contact@travelbae.app)' },
-  });
+  const r = await fetch(url, { headers: { 'User-Agent': 'TravelBae/1.0 (contact@travelbae.app)' } });
   const data = await r.json();
   const pages = data.query?.pages || {};
 
@@ -637,7 +659,7 @@ async function commonsSearch(q, limit = 15) {
     .filter(p => {
       const info = p.imageinfo?.[0];
       if (!info?.url) return false;
-      if (PHOTO_NOISE_RE.test((p.title || '').toLowerCase())) return false;
+      if (PHOTO_NOISE.test((p.title || '').toLowerCase())) return false;
       if (!/\.(jpg|jpeg|png|webp)$/i.test(info.url)) return false;
       if (info.width && info.height && info.width < info.height) return false;
       return true;
@@ -648,7 +670,6 @@ async function commonsSearch(q, limit = 15) {
 router.get('/photos', async (req, res) => {
   const { q } = req.query;
   if (!q) return res.status(400).json({ error: 'q is required' });
-
   if (photoCache.has(q)) return res.json({ urls: photoCache.get(q) });
 
   try {
@@ -658,7 +679,6 @@ router.get('/photos', async (req, res) => {
       const bare = q.split(',')[0].trim();
       if (bare !== q) urls = [...new Set([...urls, ...await commonsSearch(bare)])];
     }
-
     const result = urls.slice(0, 3);
     photoCache.set(q, result);
     setTimeout(() => photoCache.delete(q), 60 * 60 * 1000);
@@ -670,9 +690,6 @@ router.get('/photos', async (req, res) => {
 });
 
 module.exports = router;
-
-
-
 
 
 /// // src/routes/ai.js
