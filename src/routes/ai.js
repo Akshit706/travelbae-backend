@@ -194,8 +194,11 @@ async function callGeminiWithSearch({ prompt, maxTokens = 8000, temperature = 0.
     }),
   });
 
+  // const data = await res.json();
+  // if (data.error) throw new Error(data.error.message || 'Gemini Search error');
   const data = await res.json();
-  if (data.error) throw new Error(data.error.message || 'Gemini Search error');
+    console.log('Grounding raw response:', JSON.stringify(data?.error || 'no error field'));
+    if (data.error) throw new Error(data.error.message || 'Gemini Search error');
 
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
   const groundingMetadata = data.candidates?.[0]?.groundingMetadata || null;
@@ -343,7 +346,7 @@ Return this as structured data I can use to build an itinerary. Be extremely spe
       }
       } catch (searchErr) {
       console.warn('Search grounding failed, falling back to trained knowledge:', searchErr.message);
-      console.warn('Full grounding error:', JSON.stringify(searchErr));
+      console.warn('Full grounding error:', searchErr.message, searchErr.stack);
     // } catch (searchErr) {
     //   console.warn('Search grounding failed, falling back to trained knowledge:', searchErr.message);
       // Fallback: use Gemini's trained knowledge without grounding
