@@ -608,19 +608,31 @@ Build each day like a story arc with a natural rhythm:
   07:30 PM  Dinner — specific restaurant + exact dish
 Target ${activitiesPerDay} activities per day (Day 1: fewer due to arrival; Day ${clampedDays}: fewer due to checkout).
 
-── RULE 6: TIME LOGIC ──
-End time = start time + duration. Leave 30 min travel buffer between places in different areas. Never overlap two activities.
+── RULE 6: TIME LOGIC & END TIMES ──
+For EVERY activity, compute and output:
+  • "time": start time (HH:MM AM/PM)
+  • "endTime": start time + duration (HH:MM AM/PM)
+  • "travelToNext": how long and how to get to the NEXT activity, e.g. "10 min walk", "20 min tuk-tuk", "5 min taxi" — omit only for the last activity of the day
+End time of activity N must be ≤ start time of activity N+1 minus travelToNext. Never overlap. Always include endTime.
 
-── RULE 7: CLUSTER ──
+── RULE 7: OPENING HOURS ──
+Use the opening_hours from the research data. NEVER schedule:
+  • A temple/museum before it opens (most open 8–9 AM, not 6 AM)
+  • A restaurant for breakfast if it opens at 11 AM
+  • A market visit after it closes
+If hours are unknown, assume: attractions 9 AM–6 PM, restaurants 8 AM–10 PM, markets 6 AM–2 PM.
+Put the opening hours in the "openingHours" field. If scheduling near opening/closing, warn in the note: "They open at 9 — arrive by 8:50 to beat the queue."
+
+── RULE 8: CLUSTER ──
 Group places in the same neighbourhood on the same day to minimise transit time and fatigue.
 
-── RULE 8: MEALS ──
+── RULE 9: MEALS ──
 Never write "local restaurant", "street stall", or "nearby cafe". Always name the exact place and dish from the restaurant pool above.
 
-── RULE 9: POOL EXHAUSTION ──
+── RULE 10: POOL EXHAUSTION ──
 If named places run out for later days, use: a named neighbourhood walk (give the real street/neighbourhood name), a local market, a sunset viewpoint, a craft shopping lane. Never repeat a named venue.
 
-── RULE 10: proTip ──
+── RULE 11: proTip ──
 One genuinely specific, actionable insider tip per day. Not "carry water" or "wear sunscreen". Something like: "The queue at X forms before 8 AM — arrive at 7:45 and you'll walk straight in" or "Ask for the off-menu Y dish at Z — it's not on the board but locals always order it."
 
 Return ONLY valid JSON, no markdown, no backticks, no comments:
@@ -641,10 +653,13 @@ Return ONLY valid JSON, no markdown, no backticks, no comments:
       "activities": [
         {
           "time": "02:00 PM",
+          "endTime": "03:00 PM",
+          "travelToNext": "5 min walk",
           "name": "Hotel Check-in & Freshen Up",
           "type": "hotel",
           "energyLevel": "rest",
           "duration": "1 hour",
+          "openingHours": "24 hours",
           "note": "You've just landed — drop your bags, take a cold shower, and breathe. The city can wait an hour.",
           "cost": "included in stay",
           "icon": "🏨",
@@ -731,6 +746,9 @@ Return ONLY valid JSON (no markdown, no backticks):
       "emoji": "🍜",
       "name": "exact dish name",
       "desc": "what makes it special here specifically, and the best-known place to get it",
+      "rating": 4.7,
+      "priceRange": "₹80–150",
+      "bestTime": "breakfast",
       "tags": ["must-try"]
     }
   ],
@@ -739,6 +757,9 @@ Return ONLY valid JSON (no markdown, no backticks):
       "emoji": "📍",
       "name": "exact restaurant / stall / market name",
       "desc": "why it is an institution — its history, signature item, or what locals say about it",
+      "rating": 4.5,
+      "priceRange": "₹200–400 per person",
+      "bestTime": "dinner",
       "tags": ["iconic"]
     }
   ],
@@ -747,6 +768,9 @@ Return ONLY valid JSON (no markdown, no backticks):
       "emoji": "✨",
       "name": "specific named experience",
       "desc": "why a traveller would regret missing this",
+      "rating": 4.8,
+      "priceRange": "free",
+      "bestTime": "early morning",
       "tags": ["offbeat"]
     }
   ],
@@ -756,6 +780,9 @@ Rules:
 - 5–6 items in dishes, 4–5 in places, 3–4 in experiences
 - Every entry must be specific, named, and pass the quality bar above
 - Never repeat the same place across sections
+- "rating" is a float 1.0–5.0 based on what the research context suggests about popularity/acclaim; omit if no signal
+- "priceRange" is approximate cost per person for that specific item/place; use local currency symbol
+- "bestTime" is when to go: e.g. "breakfast", "lunch", "dinner", "early morning", "evening", "anytime", "weekends only"
 - Tags choose from: must-try, must-do, iconic, heritage, scenic, culture, offbeat, hidden-gem, seasonal, local-favourite
 - Use ONLY information grounded in the research context`;
 
