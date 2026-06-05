@@ -356,10 +356,14 @@ Return this as structured data I can use to build an itinerary. Be extremely spe
     let sources = [];
 
     try {
+      console.log(`🔍 [ITINERARY] Firing 2 Serper searches for: ${destination}`);
       const [attractionsSearch, foodSearch] = await Promise.all([
         serperSearch(`best places to visit hidden gems local experiences ${destination}`),
         serperSearch(`best food restaurants street food travel tips ${destination}`),
       ]);
+      console.log(`✅ [SERPER] Attractions results (${attractionsSearch.sources.length} sources):`, attractionsSearch.sources.map(s => s.url));
+      console.log(`✅ [SERPER] Food results (${foodSearch.sources.length} sources):`, foodSearch.sources.map(s => s.url));
+      console.log(`📄 [SERPER] Combined search text length: ${(attractionsSearch.text + foodSearch.text).length} chars`);
       const combinedSearch = attractionsSearch.text + '\n\n' + foodSearch.text;
       const combinedSources = [...attractionsSearch.sources, ...foodSearch.sources];
 
@@ -374,11 +378,14 @@ ${combinedSearch}
 Now answer the following using the search results above as context:
 ${researchPrompt}
 `;
+      console.log(`🤖 [GEMINI] Sending Phase 1 research prompt (${augmentedResearchPrompt.length} chars) to Gemini...`);
       const text = await callGemini({
         messages: [{ role: 'user', content: augmentedResearchPrompt }],
         maxTokens: 6000,
         temperature: 0.2,
       });
+      console.log(`✅ [GEMINI] Phase 1 research done. Response length: ${text.length} chars`);
+      console.log(`📄 [GEMINI] Phase 1 snippet:`, text.slice(0, 300));
       const groundingMetadata = { groundingChunks: combinedSources.map(s => ({ web: s })) };
       researchData = text;
 
@@ -467,12 +474,15 @@ Return ONLY valid JSON — no markdown, no backticks, no explanation:
     //   temperature: 0.4,
     // });
 
+    console.log(`⏳ [ITINERARY] Waiting 4s before Phase 2...`);
     await new Promise(r => setTimeout(r, 4000));
+    console.log(`🤖 [GEMINI] Sending Phase 2 itinerary build prompt...`);
     const itineraryText = await callGemini({
       messages: [{ role: 'user', content: itineraryPrompt }],
       maxTokens: 8000,
       temperature: 0.4,
     });
+    console.log(`✅ [GEMINI] Phase 2 done. Itinerary text length: ${itineraryText.length} chars`);
 
     const itinerary = await parseOrRepairJson(itineraryText, 'travel itinerary');
 
@@ -516,9 +526,12 @@ Return ONLY valid JSON:
 
     let text;
     try {
-    const { text: searchResults, sources: tasteSources } = await serperSearch(
+    console.log(`🔍 [LOCAL TASTE] Firing Serper search for: ${destination}`);
+      const { text: searchResults, sources: tasteSources } = await serperSearch(
         `best local food dishes restaurants street food experiences ${destination}`
       );
+      console.log(`✅ [SERPER] Local taste results (${tasteSources.length} sources):`, tasteSources.map(s => s.url));
+      console.log(`📄 [SERPER] Search text length: ${searchResults.length} chars`);
       const augmentedTastePrompt = `
 You have access to the following real-time web search results. Use them as your primary source of truth.
 
@@ -530,11 +543,14 @@ ${searchResults}
 Now answer the following using the search results above as context:
 ${prompt}
 `;
+      console.log(`🤖 [GEMINI] Sending local taste prompt (${augmentedTastePrompt.length} chars)...`);
       text = await callGemini({
         messages: [{ role: 'user', content: augmentedTastePrompt }],
         maxTokens: 2000,
         temperature: 0.3,
-      });  
+      });
+      console.log(`✅ [GEMINI] Local taste done. Response length: ${text.length} chars`);
+      console.log(`📄 [GEMINI] Local taste snippet:`, text.slice(0, 300));  
     } catch {
       text = await callGemini({ messages: [{ role: 'user', content: prompt }], maxTokens: 2000 });
     }
