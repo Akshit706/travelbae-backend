@@ -405,13 +405,14 @@ router.post('/itinerary', async (req, res) => {
   if (!destination || !days)
     return res.status(400).json({ error: 'destination and days are required.' });
 
-  const budgetPerDay = budget ? Math.round(budget / days) : null;
+  const clampedDays  = Math.min(Math.max(1, parseInt(days) || 1), 30);
+  const budgetPerDay = budget ? Math.round(budget / clampedDays) : null;
   const interestStr  = interests.length
     ? interests.map(i => i.replace(/^[^\w]+/, '').trim()).join(', ')
     : 'sightseeing, food, culture, local experiences';
 
   console.log(`\n${'═'.repeat(60)}`);
-  console.log(`🗺️  ITINERARY: ${destination} | ${days} days | ${interestStr}`);
+  console.log(`🗺️  ITINERARY: ${destination} | ${clampedDays} days | ${interestStr}`);
   console.log(`${'═'.repeat(60)}`);
 
   try {
@@ -427,6 +428,14 @@ router.post('/itinerary', async (req, res) => {
 
     // ── PHASE 2: Structured extraction ────────────────────────
     console.log('\n🧠 PHASE 2: Structured extraction');
+    // Scale extraction and build limits based on trip length
+    const maxAttractions    = Math.min(Math.max(20, clampedDays * 2), 50);
+    const maxRestaurants    = Math.min(Math.max(12, clampedDays), 30);
+    const maxExperiences    = Math.min(Math.max(6,  Math.floor(clampedDays / 2)), 15);
+    // ~1400 tokens/day for activities + metadata, minimum 8000, cap at model limit
+    const phase3Tokens      = Math.min(Math.max(8000, clampedDays * 1400), 65000);
+    const phase2Tokens      = Math.min(Math.max(6000, clampedDays * 300),  16000);
+
     const extractionPrompt = `You are a travel data analyst. Extract structured travel information from the research context below.
 
 DESTINATION: ${destination}
@@ -486,13 +495,13 @@ Return ONLY valid JSON (no markdown, no backticks). Use ONLY information from th
   "areas_to_stay": ["area1 — why","area2 — why"],
   "what_to_avoid": ["avoid1","avoid2","avoid3"]
 }
-Max: 20 attractions, 12 restaurants, 6 local_experiences.`;
+Max: ${maxAttractions} attractions, ${maxRestaurants} restaurants, ${maxExperiences} local_experiences.`;
 
     let structuredData = null;
     try {
       const extractionText = await callGemini({
         messages: [{ role: 'user', content: extractionPrompt }],
-        maxTokens: 6000, temperature: 0,
+        maxTokens: phase2Tokens, temperature: 0,
       });
       structuredData = await parseOrRepair(extractionText, 'structured travel data');
       console.log(`✅ [PHASE 2] ${structuredData.attractions?.length || 0} attractions, ${structuredData.restaurants?.length || 0} restaurants`);
@@ -512,25 +521,25 @@ Max: 20 attractions, 12 restaurants, 6 local_experiences.`;
       ? JSON.stringify(structuredData, null, 2)
       : researchContext.slice(0, 8000);
 
-    const itineraryPrompt = `You are an expert travel planner. Build a PERFECT ${days}-day itinerary for ${destination} using ONLY the structured research data below. Do not invent places not in the data.
+    const itineraryPrompt = `You are an expert travel planner. Build a PERFECT ${clampedDays}-day itinerary for ${destination} using ONLY the structured research data below. Do not invent places not in the data.
 
 RESEARCH DATA:
 ${researchInput}
 
 TRIP DETAILS:
 - Destination: ${destination}
-- Duration: ${days} days
+- Duration: ${clampedDays} days
 - People: ${people}
 - Budget: ${budget ? `₹${budget} total (₹${budgetPerDay}/day for the group)` : 'flexible'}
 - Interests: ${interestStr}
 - Arrival: Day 1 ${arrivalLabel}
-- Departure: Day ${days} ${departureLabel}
+- Departure: Day ${clampedDays} ${departureLabel}
 ${customDescription ? `- TRAVELLER INSTRUCTIONS (highest priority): "${customDescription}"` : ''}
 
 RULES:
 1. Cluster nearby places on the same day — minimise backtracking
 2. Mornings: popular/crowded spots. Afternoons: leisurely. Evenings: food, markets, sunset
-3. Day 1: gentle arrival + orientation. Day ${days}: checkout-friendly, near transport
+3. Day 1: gentle arrival + orientation. Day ${clampedDays}: checkout-friendly, near transport
 4. Every meal slot must name a specific restaurant/stall + what to order
 5. At least one local/hidden-gem experience per day
 6. Stay within budget; note approximate costs
@@ -538,7 +547,7 @@ RULES:
 
 Return ONLY valid JSON, no markdown, no backticks, no comments:
 {
-  "headline": "compelling ${days}-day title",
+  "headline": "compelling ${clampedDays}-day title",
   "summary": "2-sentence hook",
   "totalEstimatedCost": "₹XX,XXX",
   "bestTimeToVisit": "string",
@@ -571,7 +580,7 @@ Return ONLY valid JSON, no markdown, no backticks, no comments:
 
     const itineraryText = await callGemini({
       messages: [{ role: 'user', content: itineraryPrompt }],
-      maxTokens: 8000, temperature: 0.3,
+      maxTokens: phase3Tokens, temperature: 0.3,
     });
     console.log(`✅ [PHASE 3] ${itineraryText.length} chars`);
 
