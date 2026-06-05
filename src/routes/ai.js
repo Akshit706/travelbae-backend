@@ -282,10 +282,10 @@ async function fetchPageContent(url, maxChars = 4000) {
 // ─────────────────────────────────────────────────────────────────
 // RESEARCH ASSEMBLER
 // ─────────────────────────────────────────────────────────────────
-async function buildResearchContext(searchResults) {
+async function buildResearchContext(searchResults, topN = FETCH_TOP_N) {
   const organic = searchResults.filter(r => r.type === 'organic');
   const sorted  = [...organic].sort((a, b) => preferScore(b.url) - preferScore(a.url));
-  const toFetch = sorted.filter(r => shouldFetch(r.url)).slice(0, FETCH_TOP_N);
+  const toFetch = sorted.filter(r => shouldFetch(r.url)).slice(0, topN);
 
   console.log(`🌐 [FETCH] Fetching ${toFetch.length} pages:`, toFetch.map(r => r.url));
   const fetched = await Promise.allSettled(toFetch.map(r => fetchPageContent(r.url)));
@@ -418,13 +418,25 @@ router.post('/itinerary', async (req, res) => {
   try {
     // ── PHASE 1: Research ──────────────────────────────────────
     console.log('\n📡 PHASE 1: Research');
-    const searchResults = await serperMultiSearch([
+    // Scale search breadth with trip length: more days → more unique places needed
+    const numPerQuery = clampedDays <= 3 ? 8 : clampedDays <= 7 ? 10 : 12;
+    const fetchTopN   = clampedDays <= 3 ? 3 : clampedDays <= 7 ? 5 : 7;
+    const searchQueries = [
       `${destination} top attractions things to do travel guide`,
       `${destination} best restaurants local food street food where to eat`,
       `${destination} hidden gems offbeat local tips travel`,
       `${destination} travel tips practical guide transport budget`,
-    ], 8);
-    const { context: researchContext, sources } = await buildResearchContext(searchResults);
+    ];
+    if (clampedDays > 3) {
+      searchQueries.push(`${destination} neighborhoods areas explore walking tour`);
+      searchQueries.push(`${destination} day trips excursions nearby places`);
+    }
+    if (clampedDays > 7) {
+      searchQueries.push(`${destination} museums galleries cultural heritage sites`);
+      searchQueries.push(`${destination} local markets shopping authentic experiences`);
+    }
+    const searchResults = await serperMultiSearch(searchQueries, numPerQuery);
+    const { context: researchContext, sources } = await buildResearchContext(searchResults, fetchTopN);
 
     // ── PHASE 2: Structured extraction ────────────────────────
     console.log('\n🧠 PHASE 2: Structured extraction');
@@ -436,7 +448,7 @@ router.post('/itinerary', async (req, res) => {
     const phase3Tokens      = Math.min(Math.max(8000, clampedDays * 1400), 65000);
     const phase2Tokens      = Math.min(Math.max(6000, clampedDays * 300),  16000);
 
-    const extractionPrompt = `You are a travel data analyst. Extract structured travel information from the research context below.
+    const extractionPrompt = `You are a travel data analyst. Extract EVERY named place from the research context below — the more unique places you find, the better.
 
 DESTINATION: ${destination}
 ${budget ? `BUDGET: ₹${budget} total (₹${budgetPerDay}/day) for ${people} person(s)` : ''}
@@ -445,7 +457,13 @@ INTERESTS: ${interestStr}
 RESEARCH CONTEXT:
 ${researchContext}
 
-Return ONLY valid JSON (no markdown, no backticks). Use ONLY information from the context. Omit any field you cannot find — never invent data:
+RULES:
+- Include every specifically named attraction, restaurant, market, street, neighbourhood, temple, beach, viewpoint, and experience you find.
+- Never merge two different places into one entry.
+- Never invent or hallucinate a place not mentioned in the context.
+- Omit a field if the context does not mention it — do NOT guess.
+
+Return ONLY valid JSON (no markdown, no backticks):
 {
   "destination_overview": "2-3 sentence overview",
   "best_time_to_visit": "specific months and why",
@@ -459,14 +477,13 @@ Return ONLY valid JSON (no markdown, no backticks). Use ONLY information from th
   },
   "attractions": [
     {
-      "name": "exact place name",
-      "type": "temple|museum|market|beach|viewpoint|park|heritage|experience",
-      "rating": "4.5",
-      "area": "neighbourhood",
+      "name": "exact place name as written in context",
+      "type": "temple|museum|market|beach|viewpoint|park|heritage|experience|neighbourhood|street",
+      "area": "neighbourhood or district",
       "opening_hours": "9 AM – 6 PM",
       "entry_fee": "₹200 or Free",
       "duration": "1-2 hours",
-      "best_for": "what it is famous for",
+      "best_for": "one line: what it is famous for",
       "insider_tip": "specific tip tourists miss",
       "priority": "must_do|recommended|if_time_permits"
     }
@@ -474,8 +491,8 @@ Return ONLY valid JSON (no markdown, no backticks). Use ONLY information from th
   "restaurants": [
     {
       "name": "exact name",
-      "type": "street_food|casual|fine_dining|cafe|market",
-      "area": "neighbourhood",
+      "type": "street_food|casual|fine_dining|cafe|market|hawker",
+      "area": "neighbourhood or district",
       "specialty": "specific dish to order",
       "price_range": "₹XX–₹XX per person",
       "best_meal": "breakfast|lunch|dinner|anytime",
@@ -495,7 +512,7 @@ Return ONLY valid JSON (no markdown, no backticks). Use ONLY information from th
   "areas_to_stay": ["area1 — why","area2 — why"],
   "what_to_avoid": ["avoid1","avoid2","avoid3"]
 }
-Max: ${maxAttractions} attractions, ${maxRestaurants} restaurants, ${maxExperiences} local_experiences.`;
+Extract up to ${maxAttractions} attractions, ${maxRestaurants} restaurants, ${maxExperiences} local_experiences. Prioritise quantity of unique named places over brevity.`;
 
     let structuredData = null;
     try {
@@ -521,9 +538,29 @@ Max: ${maxAttractions} attractions, ${maxRestaurants} restaurants, ${maxExperien
       ? JSON.stringify(structuredData, null, 2)
       : researchContext.slice(0, 8000);
 
-    const itineraryPrompt = `You are an expert travel planner. Build a PERFECT ${clampedDays}-day itinerary for ${destination} using ONLY the structured research data below. Do not invent places not in the data.
+    // Build readable place pools so the model sees exactly what's available
+    const attractionPool = (structuredData?.attractions || [])
+      .map(a => `• [${a.area || '?'}] ${a.name} (${a.type}, ${a.duration || '1-2h'}, ${a.entry_fee || '?'})`)
+      .join('\n') || '(see research data)';
+    const restaurantPool = (structuredData?.restaurants || [])
+      .map(r => `• [${r.area || '?'}] ${r.name} — ${r.specialty || r.type} (${r.best_meal || 'anytime'}, ${r.price_range || '?'})`)
+      .join('\n') || '(see research data)';
+    const experiencePool = (structuredData?.local_experiences || [])
+      .map(e => `• ${e.name}: ${e.description || ''}`)
+      .join('\n');
 
-RESEARCH DATA:
+    const activitiesPerDay = clampedDays <= 3 ? 6 : clampedDays <= 7 ? 5 : 4;
+
+    const itineraryPrompt = `You are an expert travel planner creating a real, usable ${clampedDays}-day itinerary for ${destination}.
+
+AVAILABLE ATTRACTIONS (use only these; do not invent new ones):
+${attractionPool}
+
+AVAILABLE RESTAURANTS (use only these for named meals):
+${restaurantPool}
+${experiencePool ? `\nAVAILABLE LOCAL EXPERIENCES:\n${experiencePool}` : ''}
+
+FULL RESEARCH DATA (for costs, tips, context):
 ${researchInput}
 
 TRIP DETAILS:
@@ -536,39 +573,56 @@ TRIP DETAILS:
 - Departure: Day ${clampedDays} ${departureLabel}
 ${customDescription ? `- TRAVELLER INSTRUCTIONS (highest priority): "${customDescription}"` : ''}
 
-RULES:
-1. Cluster nearby places on the same day — minimise backtracking
-2. Mornings: popular/crowded spots. Afternoons: leisurely. Evenings: food, markets, sunset
-3. Day 1: gentle arrival + orientation. Day ${clampedDays}: checkout-friendly, near transport
-4. Every meal slot must name a specific restaurant/stall + what to order
-5. At least one local/hidden-gem experience per day
-6. Stay within budget; note approximate costs
-7. Add a "proTip" per day (something most tourists miss)
+STRICT RULES — VIOLATING ANY OF THESE MAKES THE OUTPUT USELESS:
+
+1. ZERO REPEATS: Every activity "name" must be globally unique across ALL ${clampedDays} days. Before writing each activity mentally check: "Have I used this place on any previous day?" If yes, pick a different place.
+
+2. DAY STRUCTURE — follow this template every day:
+   07:30 AM  Breakfast — name a specific restaurant/stall + exact dish
+   09:30 AM  Morning attraction or experience
+   11:30 AM  (optional) second morning spot if nearby
+   01:00 PM  Lunch — name a specific restaurant/stall + exact dish
+   02:30 PM  Afternoon attraction or experience
+   05:00 PM  (optional) evening stroll, market, viewpoint, or neighbourhood walk
+   07:30 PM  Dinner — name a specific restaurant/stall + exact dish
+   Target ${activitiesPerDay} activities per day (±1 for Day 1 arrival / Day ${clampedDays} checkout).
+
+3. TIME LOGIC: End time = start time + duration. Leave 30 min travel buffer between places in different areas. Never schedule two activities at the same time.
+
+4. CLUSTER: Group places in the same neighbourhood on the same day to minimise transit.
+
+5. Day 1 — gentle start: if arrival is morning slot, begin with afternoon activities only. If afternoon, begin with evening only.
+   Day ${clampedDays} — checkout friendly: only morning activities before noon, nothing full-day.
+
+6. MEALS: Never write "local restaurant" or "street stall" — always name the exact place and dish from the pool above.
+
+7. If the pool runs out of unique places for later days, use: neighbourhood walks, local market browsing, sunset viewpoints, or craft shopping — give them a real area name. Never repeat a named venue.
+
+8. proTip per day: One specific, actionable insider detail most tourists miss. Not generic advice like "carry water".
 
 Return ONLY valid JSON, no markdown, no backticks, no comments:
 {
   "headline": "compelling ${clampedDays}-day title",
-  "summary": "2-sentence hook",
+  "summary": "2-sentence hook that makes someone want to go",
   "totalEstimatedCost": "₹XX,XXX",
   "bestTimeToVisit": "string",
   "quickTips": ["tip1","tip2","tip3","tip4"],
   "days": [
     {
       "day": 1,
-      "title": "Theme e.g. Old City & Street Food Trail",
+      "title": "Theme e.g. Old Town & Street Food Crawl",
       "theme": "one-line mood",
       "estimatedCost": "₹X,XXX",
-      "proTip": "insider tip most tourists miss",
-      "weather": { "high": 32, "low": 24, "condition": "Sunny", "tip": "Carry water" },
+      "proTip": "specific insider tip",
+      "weather": { "high": 32, "low": 24, "condition": "Sunny", "tip": "Carry sunscreen" },
       "activities": [
         {
-          "time": "08:00 AM",
-          "name": "Exact place name from research",
-          "type": "attraction|food|experience|transport|hotel|shopping",
+          "time": "07:30 AM",
+          "name": "Exact place name from pool",
+          "type": "attraction|food|experience|transport|shopping",
           "duration": "1.5 hours",
-          "note": "specific insider detail",
+          "note": "specific detail: what to order / what to see / insider context",
           "cost": "₹200 per person",
-          "rating": "4.7 ⭐",
           "icon": "🏰",
           "mustDo": true,
           "area": "neighbourhood"
@@ -585,6 +639,22 @@ Return ONLY valid JSON, no markdown, no backticks, no comments:
     console.log(`✅ [PHASE 3] ${itineraryText.length} chars`);
 
     const itinerary = await parseOrRepair(itineraryText, 'itinerary');
+
+    // ── Server-side deduplication pass ─────────────────────────────────────────
+    // Guarantees no activity appears twice even if the model slips.
+    const seenActivities = new Set();
+    let dupeCount = 0;
+    for (const day of (itinerary.days || [])) {
+      day.activities = (day.activities || []).filter(act => {
+        const key = (act.name || '').toLowerCase().replace(/[^a-z0-9]/g, ' ').trim();
+        if (!key) return false;
+        if (seenActivities.has(key)) { dupeCount++; return false; }
+        seenActivities.add(key);
+        return true;
+      });
+    }
+    if (dupeCount > 0) console.warn(`⚠️  [DEDUP] Removed ${dupeCount} duplicate activit${dupeCount === 1 ? 'y' : 'ies'} server-side`);
+
     const actCount  = itinerary.days?.reduce((s, d) => s + (d.activities?.length || 0), 0) || 0;
     console.log(`🎉 [ITINERARY] Done — ${itinerary.days?.length || 0} days, ${actCount} activities`);
 
