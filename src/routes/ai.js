@@ -18,25 +18,34 @@ router.use(authenticate);
 // ─────────────────────────────────────────────────────────────────
 // CONFIG
 // ─────────────────────────────────────────────────────────────────
-// Model cascade: lite first (highest free RPM), fall back on quota
-const GEMINI_MODELS = [
-  'gemini-2.0-flash-lite',
-  'gemini-1.5-flash',
-  'gemini-1.5-flash-8b',
-];
-const SERPER_URL = 'https://google.serper.dev/search';
-const FETCH_TOP_N = 3;       // editorial pages to deep-fetch
-const MIN_GAP_MS  = 2000;    // min ms between Gemini calls (burst guard)
 
-// Domains we skip fetching (login-walled, video, social)
+// Model cascade — ordered by: free RPM → quality
+// gemini-3.1-flash-lite : highest free RPM, fastest, primary workhorse
+// gemini-2.5-flash-lite : fallback, still fast and free
+// gemini-2.5-flash      : final fallback, best quality, lower free RPM
+const GEMINI_MODELS = [
+  'gemini-3.1-flash-lite',
+  'gemini-2.5-flash-lite',
+  'gemini-2.5-flash',
+];
+
+// Per-model cooldown tracking — if a model 429s, skip it for COOLDOWN_MS
+// This means the NEXT call immediately tries the next model, no waiting
+const MODEL_COOLDOWN_MS = 65000; // 65s — just past the 1-min window
+const modelCooldowns = new Map(); // modelName → timestamp when it's usable again
+
+const SERPER_URL  = 'https://google.serper.dev/search';
+const FETCH_TOP_N = 3;
+
+// Domains to skip fetching (login-walled, video, social, aggregators)
 const SKIP_FETCH_DOMAINS = [
   'youtube.com', 'facebook.com', 'instagram.com', 'twitter.com',
   'reddit.com',  'tripadvisor.com', 'tripadvisor.in', 'makemytrip.com',
-  'klook.com',   'viator.com',      'getyourguide.com', 'booking.com',
+  'klook.com',   'viator.com', 'getyourguide.com', 'booking.com',
   'agoda.com',   'expedia.com',
 ];
 
-// Domains worth fetching (high-quality editorial travel content)
+// Editorial domains worth deep-fetching
 const PREFER_FETCH_DOMAINS = [
   'lonelyplanet.com', 'nomadicmatt.com',   'wikivoyage.org',
   'travelandleisure.com', 'timeout.com',   'cntraveler.com',
@@ -48,28 +57,20 @@ const PREFER_FETCH_DOMAINS = [
 ];
 
 // ─────────────────────────────────────────────────────────────────
-// GLOBAL GEMINI QUEUE — serialize all calls, prevent burst 429s
-// ─────────────────────────────────────────────────────────────────
-let _geminiQueue = Promise.resolve();
-
-function enqueueGemini(fn) {
-  const next = _geminiQueue.then(async () => {
-    const result = await fn();
-    await new Promise(r => setTimeout(r, MIN_GAP_MS));
-    return result;
-  });
-  _geminiQueue = next.catch(() => {}); // don't let errors block the queue
-  return next;
-}
-
-// ─────────────────────────────────────────────────────────────────
-// GEMINI CALLER — retry with backoff + model fallback
+// GEMINI CALLER — fast model cascade, no queue blocking
+//
+// Strategy:
+//   • Try models in cascade order
+//   • If a model is in cooldown → skip it immediately (no wait)
+//   • If a model returns 429 → put it in cooldown, try next model NOW
+//   • If all models are in cooldown → wait for the soonest to recover
+//   • Non-429 errors → skip to next model immediately
 // ─────────────────────────────────────────────────────────────────
 function geminiUrl(model) {
   return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`;
 }
 
-function isRateLimit(data) {
+function isRateLimitError(data) {
   return (
     data?.error?.code === 429 ||
     (data?.error?.message || '').toLowerCase().includes('quota') ||
@@ -77,74 +78,104 @@ function isRateLimit(data) {
   );
 }
 
-function parseRetryDelay(msg) {
-  const m = String(msg || '').match(/retry in ([\d.]+)s/i);
-  const secs = m ? parseFloat(m[1]) : 15;
-  return Math.min(Math.max(secs, 5), 60) * 1000;
+function isModelNotFoundError(data) {
+  const msg = (data?.error?.message || '').toLowerCase();
+  return msg.includes('not found') || msg.includes('not supported') || data?.error?.code === 404;
 }
 
-async function callGeminiRaw(model, contents, maxTokens, temperature) {
-  const res = await fetch(geminiUrl(model), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents,
-      generationConfig: { maxOutputTokens: maxTokens, temperature },
-    }),
-  });
-  return res.json();
+function modelAvailableAt(model) {
+  return modelCooldowns.get(model) || 0;
+}
+
+function putModelOnCooldown(model) {
+  const until = Date.now() + MODEL_COOLDOWN_MS;
+  modelCooldowns.set(model, until);
+  console.warn(`🔴 [GEMINI] ${model} on cooldown for ${MODEL_COOLDOWN_MS / 1000}s`);
 }
 
 async function callGemini({ system, messages, maxTokens = 1000, temperature = 0.7 }) {
-  return enqueueGemini(async () => {
-    // Build contents array once
-    const contents = [];
-    if (system) {
-      contents.push({ role: 'user',  parts: [{ text: `[System instructions]: ${system}` }] });
-      contents.push({ role: 'model', parts: [{ text: 'Understood.' }] });
-    }
-    for (const msg of messages) {
-      contents.push({
-        role: msg.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: msg.content }],
-      });
+  // Build contents once
+  const contents = [];
+  if (system) {
+    contents.push({ role: 'user',  parts: [{ text: `[System instructions]: ${system}` }] });
+    contents.push({ role: 'model', parts: [{ text: 'Understood.' }] });
+  }
+  for (const msg of messages) {
+    contents.push({
+      role: msg.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: msg.content }],
+    });
+  }
+
+  const body = JSON.stringify({
+    contents,
+    generationConfig: { maxOutputTokens: maxTokens, temperature },
+  });
+
+  let lastError = 'No models available';
+
+  for (let pass = 0; pass < 2; pass++) {
+    // pass 0: try all non-cooldown models
+    // pass 1: if all are in cooldown, wait for the soonest one and retry once
+
+    const now = Date.now();
+
+    // Find which models are available right now
+    const available = GEMINI_MODELS.filter(m => modelAvailableAt(m) <= now);
+
+    if (available.length === 0 && pass === 0) {
+      // All in cooldown — wait for the soonest one to recover
+      const soonest = Math.min(...GEMINI_MODELS.map(m => modelAvailableAt(m)));
+      const waitMs  = Math.max(soonest - Date.now() + 200, 0); // +200ms buffer
+      console.warn(`⏳ [GEMINI] All models in cooldown. Waiting ${(waitMs / 1000).toFixed(1)}s for next available…`);
+      await new Promise(r => setTimeout(r, waitMs));
+      continue; // retry pass 1 with refreshed availability
     }
 
-    for (let mi = 0; mi < GEMINI_MODELS.length; mi++) {
-      const model = GEMINI_MODELS[mi];
-      let lastErr = null;
-
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const data = await callGeminiRaw(model, contents, maxTokens, temperature);
+    for (const model of available) {
+      try {
+        const res  = await fetch(geminiUrl(model), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+        });
+        const data = await res.json();
 
         if (!data.error) {
-          if (mi > 0 || attempt > 0) {
-            console.log(`✅ [GEMINI] model=${model} attempt=${attempt + 1}`);
-          }
           return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
         }
 
-        lastErr = data.error.message;
-
-        if (isRateLimit(data)) {
-          const delay = parseRetryDelay(lastErr);
-          console.warn(`⏳ [GEMINI] Rate limit on ${model} attempt ${attempt + 1}/3 — waiting ${(delay/1000).toFixed(1)}s`);
-          await new Promise(r => setTimeout(r, delay));
-          continue; // retry same model
+        if (isRateLimitError(data)) {
+          putModelOnCooldown(model);
+          lastError = `${model} rate limited`;
+          continue; // try next model immediately
         }
 
-        // Non-rate error — skip straight to next model
-        console.warn(`⚠️ [GEMINI] Error on ${model}: ${lastErr}`);
-        break;
-      }
+        if (isModelNotFoundError(data)) {
+          // Permanently mark as unavailable for this session
+          modelCooldowns.set(model, Date.now() + 24 * 60 * 60 * 1000);
+          console.warn(`⚠️ [GEMINI] Model not found: ${model} — removing from rotation`);
+          lastError = `${model} not found`;
+          continue;
+        }
 
-      if (mi < GEMINI_MODELS.length - 1) {
-        console.warn(`🔄 [GEMINI] Falling back: ${model} → ${GEMINI_MODELS[mi + 1]}`);
-      } else {
-        throw new Error(`Gemini error (all models exhausted): ${lastErr}`);
+        // Other API error
+        lastError = data.error.message;
+        console.warn(`⚠️ [GEMINI] Error on ${model}: ${lastError}`);
+        continue; // try next model
+
+      } catch (fetchErr) {
+        lastError = fetchErr.message;
+        console.warn(`⚠️ [GEMINI] Fetch error on ${model}: ${lastError}`);
+        continue;
       }
     }
-  });
+
+    // If we get here on pass 0, all available models failed
+    if (pass === 0) break; // no point retrying if non-cooldown errors
+  }
+
+  throw new Error(`Gemini unavailable: ${lastError}`);
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -241,18 +272,15 @@ async function fetchPageContent(url, maxChars = 4000) {
       .replace(/<footer[\s\S]*?<\/footer>/gi, '')
       .replace(/<header[\s\S]*?<\/header>/gi, '')
       .replace(/<[^>]+>/g, ' ')
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
+      .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
       .replace(/\s{3,}/g, '\n\n')
-      .trim()
-      .slice(0, maxChars) || null;
+      .trim().slice(0, maxChars) || null;
   } catch { return null; }
 }
 
 // ─────────────────────────────────────────────────────────────────
-// RESEARCH ASSEMBLER — snippets + fetched page content
+// RESEARCH ASSEMBLER
 // ─────────────────────────────────────────────────────────────────
 async function buildResearchContext(searchResults) {
   const organic = searchResults.filter(r => r.type === 'organic');
@@ -292,10 +320,7 @@ async function buildResearchContext(searchResults) {
   }
 
   console.log(`📄 [CONTEXT] ${context.length} chars total`);
-  return {
-    context,
-    sources: organic.slice(0, 10).map(r => ({ title: r.title, url: r.url })),
-  };
+  return { context, sources: organic.slice(0, 10).map(r => ({ title: r.title, url: r.url })) };
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -309,9 +334,9 @@ function extractJson(text) {
   for (let i = start; i < clean.length; i++) {
     const ch = clean[i];
     if (inStr) {
-      if (esc)        { esc = false; continue; }
+      if (esc)         { esc = false; continue; }
       if (ch === '\\') { esc = true;  continue; }
-      if (ch === '"')   { inStr = false; continue; }
+      if (ch === '"')  { inStr = false; continue; }
       continue;
     }
     if (ch === '"') { inStr = true; continue; }
@@ -320,20 +345,20 @@ function extractJson(text) {
   }
   const end = clean.lastIndexOf('}');
   if (end > start) return clean.slice(start, end + 1);
-  throw new Error('Incomplete JSON object');
+  throw new Error('Incomplete JSON');
 }
 
 function parseJson(text) {
-  const candidate = extractJson(text)
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
-    .replace(/,\s*([}\]])/g, '$1');
-  return JSON.parse(candidate);
+  return JSON.parse(
+    extractJson(text)
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+      .replace(/,\s*([}\]])/g, '$1')
+  );
 }
 
 async function parseOrRepair(rawText, shape) {
-  try {
-    return parseJson(rawText);
-  } catch (firstErr) {
+  try { return parseJson(rawText); }
+  catch (firstErr) {
     console.warn(`⚠️ [JSON] Parse failed for ${shape}, attempting repair`);
     try {
       const repaired = await callGemini({
@@ -341,13 +366,10 @@ async function parseOrRepair(rawText, shape) {
           role: 'user',
           content: `Fix this malformed JSON. Return ONLY valid JSON, no markdown, no explanation.\n\nMALFORMED:\n${String(rawText).slice(0, 50000)}`,
         }],
-        maxTokens: 8000,
-        temperature: 0,
+        maxTokens: 8000, temperature: 0,
       });
       return parseJson(repaired);
-    } catch {
-      throw firstErr;
-    }
+    } catch { throw firstErr; }
   }
 }
 
@@ -356,9 +378,8 @@ async function parseOrRepair(rawText, shape) {
 // ─────────────────────────────────────────────────────────────────
 router.post('/chat', async (req, res) => {
   const { system, messages } = req.body;
-  if (!messages || !Array.isArray(messages)) {
+  if (!messages || !Array.isArray(messages))
     return res.status(400).json({ error: 'messages array is required.' });
-  }
   try {
     const reply = await callGemini({ system, messages, maxTokens: 500 });
     res.json({ reply });
@@ -370,10 +391,9 @@ router.post('/chat', async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────
 // ITINERARY — 3-phase pipeline
-//
-// Phase 1 : Serper (4 queries) + web-fetch editorial pages → rich context
-// Phase 2 : Gemini structured extraction (temp=0) → typed JSON data
-// Phase 3 : Gemini itinerary builder (temp=0.3) → final itinerary JSON
+// Phase 1: Serper (4 queries) + web-fetch → rich research context
+// Phase 2: Gemini extraction (temp=0) → typed structured JSON
+// Phase 3: Gemini itinerary build (temp=0.3) → final itinerary JSON
 // ─────────────────────────────────────────────────────────────────
 router.post('/itinerary', async (req, res) => {
   const {
@@ -382,9 +402,8 @@ router.post('/itinerary', async (req, res) => {
     arrivalSlot, departureSlot,
   } = req.body;
 
-  if (!destination || !days) {
+  if (!destination || !days)
     return res.status(400).json({ error: 'destination and days are required.' });
-  }
 
   const budgetPerDay = budget ? Math.round(budget / days) : null;
   const interestStr  = interests.length
@@ -396,21 +415,18 @@ router.post('/itinerary', async (req, res) => {
   console.log(`${'═'.repeat(60)}`);
 
   try {
-    // ── PHASE 1: RESEARCH ────────────────────────────────────────
+    // ── PHASE 1: Research ──────────────────────────────────────
     console.log('\n📡 PHASE 1: Research');
-
     const searchResults = await serperMultiSearch([
       `${destination} top attractions things to do travel guide`,
       `${destination} best restaurants local food street food where to eat`,
       `${destination} hidden gems offbeat local tips travel`,
       `${destination} travel tips practical guide transport budget`,
     ], 8);
-
     const { context: researchContext, sources } = await buildResearchContext(searchResults);
 
-    // ── PHASE 2: STRUCTURED EXTRACTION ──────────────────────────
+    // ── PHASE 2: Structured extraction ────────────────────────
     console.log('\n🧠 PHASE 2: Structured extraction');
-
     const extractionPrompt = `You are a travel data analyst. Extract structured travel information from the research context below.
 
 DESTINATION: ${destination}
@@ -470,26 +486,22 @@ Return ONLY valid JSON (no markdown, no backticks). Use ONLY information from th
   "areas_to_stay": ["area1 — why","area2 — why"],
   "what_to_avoid": ["avoid1","avoid2","avoid3"]
 }
-
 Max: 20 attractions, 12 restaurants, 6 local_experiences.`;
-
-    const extractionText = await callGemini({
-      messages: [{ role: 'user', content: extractionPrompt }],
-      maxTokens: 6000,
-      temperature: 0,
-    });
 
     let structuredData = null;
     try {
+      const extractionText = await callGemini({
+        messages: [{ role: 'user', content: extractionPrompt }],
+        maxTokens: 6000, temperature: 0,
+      });
       structuredData = await parseOrRepair(extractionText, 'structured travel data');
       console.log(`✅ [PHASE 2] ${structuredData.attractions?.length || 0} attractions, ${structuredData.restaurants?.length || 0} restaurants`);
     } catch (e) {
-      console.warn('⚠️ [PHASE 2] Parse failed — Phase 3 will use raw context');
+      console.warn('⚠️ [PHASE 2] Failed — Phase 3 will use raw context:', e.message);
     }
 
-    // ── PHASE 3: ITINERARY BUILD ────────────────────────────────
+    // ── PHASE 3: Itinerary build ───────────────────────────────
     console.log('\n🗓️  PHASE 3: Itinerary build');
-
     const SLOT_LABELS = {
       night: '12AM–6AM', morning: '6AM–12PM',
       afternoon: '12PM–6PM', evening: '6PM–12AM',
@@ -518,10 +530,10 @@ ${customDescription ? `- TRAVELLER INSTRUCTIONS (highest priority): "${customDes
 RULES:
 1. Cluster nearby places on the same day — minimise backtracking
 2. Mornings: popular/crowded spots. Afternoons: leisurely. Evenings: food, markets, sunset
-3. Day 1: gentle arrival + orientation. Day ${days}: checkout-friendly activities near transport
+3. Day 1: gentle arrival + orientation. Day ${days}: checkout-friendly, near transport
 4. Every meal slot must name a specific restaurant/stall + what to order
 5. At least one local/hidden-gem experience per day
-6. Stay within budget if provided; note approximate costs
+6. Stay within budget; note approximate costs
 7. Add a "proTip" per day (something most tourists miss)
 
 Return ONLY valid JSON, no markdown, no backticks, no comments:
@@ -559,10 +571,8 @@ Return ONLY valid JSON, no markdown, no backticks, no comments:
 
     const itineraryText = await callGemini({
       messages: [{ role: 'user', content: itineraryPrompt }],
-      maxTokens: 8000,
-      temperature: 0.3,
+      maxTokens: 8000, temperature: 0.3,
     });
-
     console.log(`✅ [PHASE 3] ${itineraryText.length} chars`);
 
     const itinerary = await parseOrRepair(itineraryText, 'itinerary');
@@ -585,13 +595,11 @@ router.post('/local-taste', async (req, res) => {
   if (!destination) return res.status(400).json({ error: 'destination is required.' });
 
   console.log(`\n🍜 LOCAL TASTE: ${destination}`);
-
   try {
     const searchResults = await serperMultiSearch([
       `${destination} must eat local food dishes authentic cuisine`,
       `${destination} best street food stalls local restaurants hidden gems`,
     ], 8);
-
     const { context } = await buildResearchContext(searchResults);
 
     const tastePrompt = `You are a food travel writer. Extract a local taste guide for "${destination}" using ONLY the research context below.
@@ -614,19 +622,16 @@ Return ONLY valid JSON (no markdown, no backticks):
   ],
   "tip": "single best insider tip a local would give"
 }
-
 Rules:
 - Exactly 4 items in each array
-- Every entry must be specific and named — no generics like "local restaurants"
-- Tags: pick from must-try, must-do, iconic, heritage, scenic, culture, offbeat, hidden-gem, seasonal
+- Every entry must be specific and named — no generics
+- Tags: must-try, must-do, iconic, heritage, scenic, culture, offbeat, hidden-gem, seasonal
 - Use ONLY information from the context`;
 
     const tasteText = await callGemini({
       messages: [{ role: 'user', content: tastePrompt }],
-      maxTokens: 2000,
-      temperature: 0.1,
+      maxTokens: 2000, temperature: 0.1,
     });
-
     const data = await parseOrRepair(tasteText, 'local taste');
     console.log(`✅ [LOCAL TASTE] ${data.dishes?.length} dishes, ${data.places?.length} places`);
     res.json(data);
@@ -638,7 +643,7 @@ Rules:
 });
 
 // ─────────────────────────────────────────────────────────────────
-// PHOTOS — Wikimedia Commons with 1-hour cache
+// PHOTOS — Wikimedia Commons, 1-hour cache
 // ─────────────────────────────────────────────────────────────────
 const photoCache  = new Map();
 const PHOTO_NOISE = /flag|logo|map|seal|coat|icon|emblem|portrait|locator|location|blank|outline|stub/i;
@@ -650,12 +655,9 @@ async function commonsSearch(q, limit = 15) {
     `&gsrnamespace=6&gsrlimit=${limit}` +
     `&prop=imageinfo&iiprop=url|size&iiurlwidth=900` +
     `&format=json&origin=*`;
-
   const r = await fetch(url, { headers: { 'User-Agent': 'TravelBae/1.0 (contact@travelbae.app)' } });
   const data = await r.json();
-  const pages = data.query?.pages || {};
-
-  return Object.values(pages)
+  return Object.values(data.query?.pages || {})
     .filter(p => {
       const info = p.imageinfo?.[0];
       if (!info?.url) return false;
@@ -671,7 +673,6 @@ router.get('/photos', async (req, res) => {
   const { q } = req.query;
   if (!q) return res.status(400).json({ error: 'q is required' });
   if (photoCache.has(q)) return res.json({ urls: photoCache.get(q) });
-
   try {
     let urls = await commonsSearch(`${q} monument landmark historic`);
     if (urls.length < 3) urls = [...new Set([...urls, ...await commonsSearch(q)])];
@@ -690,7 +691,6 @@ router.get('/photos', async (req, res) => {
 });
 
 module.exports = router;
-
 
 /// // src/routes/ai.js
 // // AI proxy using Google Gemini (gemini-1.5-flash).
