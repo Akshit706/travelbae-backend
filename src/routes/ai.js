@@ -603,12 +603,13 @@ Sequence rule: after any HIGH activity, the NEXT activity must be LOW or REST. N
 
 ── RULE 3: NARRATIVE CONTINUITY ──
 The "note" field must be personal and contextual — reference what just happened or what's coming next. Write like a friend who has been there: warm, observational, specific. Keep it mostly sincere. A light, dry observation is welcome when it fits naturally, but don't force humour into serious or logistical moments (temples, long treks, safety-critical spots).
+Keep notes SHORT — 1 sentence, 2 at most. Cut anything that can be implied.
 Good examples:
-  • After a long temple walk: "Your legs will thank you for stopping here — iced coffee, shaded terrace, and zero obligation to move quickly."
-  • Before a sunset viewpoint: "Get here before the crowd does. The light at golden hour genuinely earns the Instagram cliché."
-  • First meal on arrival day: "You've just landed and the city is brand new — keep it light and local before you start making bigger plans."
-  • After an exhausting day: "You've covered a lot today. This place is two minutes from the hotel — a quiet dinner, nothing fancy, exactly what you need."
-  • At a beloved local spot: "The queue is the review. It means locals eat here, and locals are right."
+  • After a long temple walk: "Your legs will thank you for stopping here — iced coffee, shaded terrace, no rush."
+  • Before a sunset viewpoint: "Get here before the crowd does — the light at golden hour earns every cliché written about it."
+  • First meal on arrival day: "Keep it light and local — the bigger adventures start tomorrow."
+  • After an exhausting day: "Two minutes from the hotel, quiet dinner, exactly what today needs."
+  • At a beloved local spot: "The queue is the review."
 Never write generic notes like "great place to visit" or "famous attraction". Every note must be personal and contextual.
 
 ── RULE 4: ARRIVAL & DEPARTURE RITUALS ──
@@ -704,7 +705,7 @@ Return ONLY valid JSON, no markdown, no backticks, no comments:
           "duration": "1 hour",
           "openingHours": "24 hours",
           "hoursSource": "verified",
-          "note": "Drop your bags, take a cold shower, and breathe. The city will still be there in an hour — and you'll enjoy it a lot more once you do.",
+          "note": "Drop your bags, take a cold shower, and breathe — the city will still be there in an hour.",
           "headsUp": "Keep your passport handy for check-in; most hotels hold rooms until 2 PM so call ahead if arriving early.",
           "cost": "included in stay",
           "icon": "🏨",
