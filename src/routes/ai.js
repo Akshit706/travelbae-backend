@@ -422,18 +422,18 @@ router.post('/itinerary', async (req, res) => {
     const numPerQuery = clampedDays <= 3 ? 8 : clampedDays <= 7 ? 10 : 12;
     const fetchTopN   = clampedDays <= 3 ? 3 : clampedDays <= 7 ? 5 : 7;
     const searchQueries = [
-      `${destination} top attractions things to do travel guide`,
-      `${destination} best restaurants local food street food where to eat`,
-      `${destination} hidden gems offbeat local tips travel`,
-      `${destination} travel tips practical guide transport budget`,
+      `${destination} top famous iconic attractions landmarks must visit travel guide`,
+      `${destination} best popular restaurants cafes rooftop bars where to eat food guide`,
+      `${destination} renowned famous street food institutions iconic food spots`,
+      `${destination} travel tips practical guide transport budget itinerary`,
     ];
     if (clampedDays > 3) {
-      searchQueries.push(`${destination} neighborhoods areas explore walking tour`);
-      searchQueries.push(`${destination} day trips excursions nearby places`);
+      searchQueries.push(`${destination} popular neighbourhoods iconic areas walking tour`);
+      searchQueries.push(`${destination} day trips famous nearby places excursions`);
     }
     if (clampedDays > 7) {
-      searchQueries.push(`${destination} museums galleries cultural heritage sites`);
-      searchQueries.push(`${destination} local markets shopping authentic experiences`);
+      searchQueries.push(`${destination} top museums galleries heritage sites entry fee hours`);
+      searchQueries.push(`${destination} famous markets shopping iconic experiences`);
     }
     const searchResults = await serperMultiSearch(searchQueries, numPerQuery);
     const { context: researchContext, sources } = await buildResearchContext(searchResults, fetchTopN);
@@ -448,7 +448,7 @@ router.post('/itinerary', async (req, res) => {
     const phase3Tokens      = Math.min(Math.max(8000, clampedDays * 1400), 65000);
     const phase2Tokens      = Math.min(Math.max(6000, clampedDays * 300),  16000);
 
-    const extractionPrompt = `You are a travel data analyst. Extract EVERY named place from the research context below — the more unique places you find, the better.
+    const extractionPrompt = `You are a travel data analyst curating a high-quality travel guide for ${destination}. Extract named places from the research context — but ONLY those that meet the quality bar below.
 
 DESTINATION: ${destination}
 ${budget ? `BUDGET: ₹${budget} total (₹${budgetPerDay}/day) for ${people} person(s)` : ''}
@@ -457,12 +457,18 @@ INTERESTS: ${interestStr}
 RESEARCH CONTEXT:
 ${researchContext}
 
+QUALITY BAR — a place only makes the list if it passes ALL of these:
+1. It is specifically named in the research context (not just "a local temple" or "street stalls")
+2. It is famous, well-known, widely recommended, or trending — the kind of place that appears in travel guides, top-10 lists, or has a genuine reputation beyond its immediate neighbourhood
+3. For restaurants/food: must be a named establishment (restaurant, dhaba, café, bakery, rooftop bar) or a nationally/globally famous street food institution — NOT a generic unnamed vendor or roadside stall. A chai stall does NOT qualify unless it is genuinely iconic and appears by name in travel editorial
+4. For attractions: must be a real landmark, heritage site, museum, iconic market, or well-known viewpoint — not a generic street or unnamed locality
+
 RULES:
-- Include every specifically named attraction, restaurant, market, street, neighbourhood, temple, beach, viewpoint, and experience you find.
+- Never include unnamed or generic places ("local market", "street vendors", "nearby temple", "a local eatery")
 - Never merge two different places into one entry.
-- CRITICAL: Only populate a field if the value appears EXPLICITLY in the research context. If the context does not mention opening hours for a place, set "opening_hours" to null. If it does not mention a price, set "entry_fee" and "price_range" to null. Never guess, infer, or use generic defaults — null is always better than a made-up value.
-- Mark each attraction/restaurant with "hours_verified": true if opening hours came from the context, false/omit otherwise.
-- Mark with "price_verified": true if price came from the context, false/omit otherwise.
+- CRITICAL: Only populate a field if the value appears EXPLICITLY in the research context. Set "opening_hours" to null if not in context. Set "entry_fee" and "price_range" to null if not in context. Never guess or infer — null is better than a made-up value.
+- Mark "hours_verified": true only if opening hours came from the context.
+- Mark "price_verified": true only if price came from the context.
 
 Return ONLY valid JSON (no markdown, no backticks):
 {
@@ -493,7 +499,7 @@ Return ONLY valid JSON (no markdown, no backticks):
   ],
   "restaurants": [
     {
-      "name": "exact name",
+      "name": "exact name — must be a named establishment or a famous institution, never a generic stall",
       "type": "street_food|casual|fine_dining|cafe|market|hawker",
       "area": "neighbourhood or district",
       "specialty": "specific dish to order",
@@ -558,7 +564,11 @@ Extract up to ${maxAttractions} attractions, ${maxRestaurants} restaurants, ${ma
 
     const activitiesPerDay = clampedDays <= 3 ? 6 : clampedDays <= 7 ? 5 : 4;
 
-    const itineraryPrompt = `You are a seasoned travel planner and a warm, knowledgeable local friend writing a ${clampedDays}-day itinerary for ${destination}. Your job is not just to list places — it is to plan a trip that FEELS right: well-paced, human, and considerate of how a real traveller's body and mood shift across the day. Most of the output is practical and clear. But in a few specific places — the summary, the proTip, and the activity note — you can let a little personality show: a dry observation, a knowing aside, a line that sounds like a smart friend rather than a guidebook.`
+    const itineraryPrompt = `You are a seasoned travel planner and a warm, knowledgeable local friend writing a ${clampedDays}-day itinerary for ${destination}. Your job is not just to list places — it is to plan a trip that FEELS right: well-paced, human, and considerate of how a real traveller's body and mood shift across the day. Most of the output is practical and clear. But in a few specific places — the summary, the proTip, and the activity note — you can let a little personality show: a dry observation, a knowing aside, a line that sounds like a smart friend rather than a guidebook.
+
+QUALITY STANDARD — mandatory for every meal and activity:
+Every restaurant, café, or food stop must be a named, established place with a real reputation — the kind featured in Lonely Planet, Condé Nast Traveller, food blogs, or local top-10 lists. No unnamed roadside stalls, no generic "local dhaba", no "chai wala" unless it is a genuinely famous institution known by name in travel editorial. If the restaurant pool below does not have enough quality options for a meal slot, replace that slot with a neighbourhood walk, a scenic stop, or a market browse — never invent a mediocre vendor.
+The same standard applies to attractions: iconic, historic, famous, or trending — not just "a temple" or "a local area".`
 
 AVAILABLE ATTRACTIONS (use only these; do not invent new ones):
 ${attractionPool}
