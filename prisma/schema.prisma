@@ -36,6 +36,7 @@ model Trip {
   shareCode   String   @unique
   coverUrl    String?
   budget           Float?
+  travelNotes      String?  // personalisation context fed to Gemini
   cachedItinerary  Json?    // persisted AI-generated itinerary { itinerary, sources }
   cachedTaste      Json?    // persisted AI-generated local taste data
   createdAt        DateTime @default(now())

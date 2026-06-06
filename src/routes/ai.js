@@ -400,7 +400,7 @@ router.post('/itinerary', async (req, res) => {
   const {
     destination, days, budget, people = 1,
     interests = [], customDescription,
-    arrivalSlot, departureSlot,
+    arrivalSlot, departureSlot, travelNotes,
   } = req.body;
 
   if (!destination || !days)
@@ -590,6 +590,18 @@ TRIP DETAILS:
 - Arrival: Day 1 ${arrivalLabel}
 - Departure: Day ${clampedDays} ${departureLabel}
 ${customDescription ? `- TRAVELLER INSTRUCTIONS (highest priority): "${customDescription}"` : ''}
+${travelNotes ? `
+── PERSONAL CONTEXT — read every word, apply thoughtfully ──
+"${travelNotes}"
+
+Personalisation rules (apply silently — do not announce them):
+• Elderly / mobility issues → flag strenuous activities (long treks, steep climbs) with a gentle note like "May be tough on the knees — the café next door is a lovely alternative." For relaxed spots add warmth: "Easy on everyone — this one the whole group will love."
+• Kids → note child-friendly angles; flag noisy/crowded spots; highlight interactive or open-air activities.
+• Dietary restrictions → only include restaurants matching those constraints; clearly note where to ask for alternatives.
+• Budget conscious → prioritise free/low-cost options; mention free-entry timings; lean on street food over sit-down meals where quality holds.
+• Solo traveller → frame notes around independence, self-discovery, social cafés, and ease of navigation alone.
+• Medical / physical conditions → acknowledge them briefly in the relevant activity note; never be alarmist, always suggest the softer alternative nearby.
+Weave this into the "note" fields naturally — like a knowledgeable friend who already knows the group. Do NOT list these rules in the output.` : ''}
 
 ════════════════════════════════════════
 RULE SET — every rule is mandatory
@@ -796,6 +808,14 @@ router.post('/local-taste', async (req, res) => {
 
 RESEARCH CONTEXT:
 ${context}
+
+PRIORITY RULE — THE CRUX FIRST:
+The single most important job of this guide is to answer: "What are the absolute non-negotiables of ${destination}? The things that, if missed, make the trip feel incomplete?"
+Apply this test to every item before including it: "Would a well-travelled food writer say — you went to ${destination} and didn't have/see/do THIS?" If yes, it belongs at the TOP of its section. If no, it goes below or is excluded.
+- DISHES: Lead with the dishes that ARE ${destination} — the ones on every food map, in every travel magazine, that locals are proud of. Not just good food — defining food. Rank them so the most iconic appears first.
+- PLACES: Lead with the unmissable landmark institutions — the restaurant/market/stall that has been there for generations, the one everyone references. Then add the newer celebrated ones.
+- EXPERIENCES: Lead with the things that are uniquely possible HERE and nowhere else. Not generic "cooking class" — the specific morning market walk, the specific street that's famous for one dish, the festival food tradition.
+Within each section, order by importance: most essential → highly recommended → interesting bonus. Never bury the headline item.
 
 QUALITY BAR — an item only makes the list if it passes ALL of these:
 1. It is specifically named (a real dish name, a real establishment name — never "local curry", "roadside stall", or "street market")

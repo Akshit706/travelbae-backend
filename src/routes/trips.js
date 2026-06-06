@@ -101,10 +101,10 @@ router.get('/', async (req, res) => {
 });
 
 // ── CREATE TRIP ─────────────────────────────────────────
-// Body: { groupName, destination, emoji, arrival, departure, isSolo, budget, nickname }
+// Body: { groupName, destination, emoji, arrival, departure, isSolo, budget, travelNotes, nickname }
 // nickname = what this user wants to be called inside the trip (e.g. "Arjun")
 router.post('/', async (req, res) => {
-  const { groupName, destination, emoji, arrival, departure, isSolo, budget, nickname } = req.body;
+  const { groupName, destination, emoji, arrival, departure, isSolo, budget, travelNotes, nickname } = req.body;
 
   if (!groupName || !destination || !arrival || !departure || !nickname) {
     return res.status(400).json({ error: 'groupName, destination, arrival, departure, and nickname are required.' });
@@ -131,6 +131,7 @@ router.post('/', async (req, res) => {
         isSolo: isSolo || false,
         shareCode,
         budget: budget ? parseFloat(budget) : null,
+        travelNotes: travelNotes || null,
         // Add the creator as the first member
         members: {
           create: {
