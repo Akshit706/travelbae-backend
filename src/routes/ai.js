@@ -427,6 +427,7 @@ router.post('/itinerary', async (req, res) => {
       `${destination} best popular restaurants cafes rooftop bars where to eat food guide`,
       `${destination} renowned famous street food institutions iconic food spots`,
       `${destination} travel tips practical guide transport budget itinerary`,
+      `${destination} top attractions opening hours timings entry fee ticket price official`,
     ];
     if (clampedDays > 3) {
       searchQueries.push(`${destination} popular neighbourhoods iconic areas walking tour`);
@@ -640,26 +641,24 @@ Build each day like a story arc. Use these as anchor points — but the ACTUAL t
   ~07:30 PM  Dinner (60–90 min)
 Target ${activitiesPerDay} activities per day (Day 1: fewer due to arrival; Day ${clampedDays}: fewer due to checkout).
 
-── RULE 6: STRICT TIME-CHAIN — EVERY MINUTE MUST BE ACCOUNTED FOR ──
-This is the most important rule. Times must form an unbroken chain with ZERO silent gaps.
+── RULE 6: TIME FLOW — COHERENT, HUMAN, NOT MILITARY ──
+This is NOT a school timetable. Real travel has friction, wandering, and spontaneous pauses.
+The goal is coherence: a traveller reading the schedule should never wonder "wait, what happened between 10 AM and 1 PM?"
 
-The chain formula is rigid:
-  startTime(N+1) = endTime(N) + travelToNext(N)
-
-MANDATORY fields for EVERY activity:
+Mandatory fields for EVERY activity:
   • "time"        — start time in 12h format "HH:MM AM/PM"
-  • "endTime"     — time + duration, computed exactly, same format
-  • "travelToNext"— how to get to the NEXT activity and how long it takes. Format: "12 min auto-rickshaw through Chandni Chowk" or "8 min walk down the ghats" — specific, vivid, never just "taxi". OMIT only for the very last activity of the day.
+  • "endTime"     — approximate finish time. Add duration to start time.
+  • "travelToNext"— how to get to the next activity, specific and vivid: "15 min auto-rickshaw past the old bazaar", "10 min walk along the lake promenade", "quick 5 min cab". Never just "taxi" or "walk". OMIT for the last activity of the day.
 
-VERIFICATION — before writing the next activity's "time", do this arithmetic explicitly in your head:
-  endTime(N) + travel_minutes(N) = startTime(N+1)
-  Example: ends 11:30 AM + 20 min auto = 11:50 AM. Next activity starts 11:50 AM. NOT 12:00 PM, NOT 1:00 PM.
+Sensibility check — for every consecutive pair of activities, the sequence must make sense:
+  endTime(N) + travelToNext(N) ≈ startTime(N+1)  (within ~15 min is fine)
 
-FORBIDDEN: any gap > 0 minutes between endTime(N) + travelToNext(N) and startTime(N+1). If there is unavoidable downtime (post-lunch rest, waiting for golden hour), make it an explicit low-energy activity:
-  { "name": "Rest & Refresh at Hotel", "type": "rest", "duration": "30 min", "note": "..." }
-  OR
-  { "name": "Chai & People-Watching at [café name]", "type": "food", "duration": "45 min", "note": "..." }
-Never leave a gap. Every minute has a plan.
+Natural breathing room IS allowed — a 10–20 min buffer between arrival and the next start is fine, human, expected.
+What is NOT allowed: large unexplained gaps (30+ min) where nothing is planned. If there is genuine downtime, name it:
+  → post-lunch slow hour → "Slow Afternoon Wander through [neighbourhood name]"
+  → waiting for golden hour → "Rooftop Chai at [café name] — watch the city slow down"
+  → natural rest → "Rest & Freshen Up at Hotel"
+Think of these not as filler but as the breaths between the big moments — they're often what travellers remember most.
 
 ── RULE 7: OPENING HOURS — STRICT SCHEDULING GATE ──
 Every attraction/market/restaurant must pass this check BEFORE you schedule it:
@@ -707,7 +706,7 @@ If named places run out for later days, use: a named neighbourhood walk (give th
 One genuinely specific, actionable insider tip per day. Not "carry water" or "wear sunscreen". Something that sounds like advice from someone who's been there — direct, specific, occasionally a dry observation when it fits naturally. E.g. "The queue at X forms before 8 AM — arrive at 7:45 and you'll walk straight in." or "Ask for the off-menu Y dish at Z — it's not on the board but locals always order it."
 
 Return ONLY valid JSON, no markdown, no backticks, no comments.
-BEFORE writing the JSON, silently verify: for every consecutive pair of activities on the same day, endTime(N) + parse(travelToNext(N)) == startTime(N+1). Fix any mismatch before outputting.
+Before writing the JSON, do a quick coherence scan: for each day, does the sequence of times make sense for a real traveller? Are there any unexplained 30+ min gaps? Fix them with a named filler activity before outputting.
 {
   "headline": "compelling ${clampedDays}-day title",
   "summary": "2-sentence hook that makes the reader immediately want to go — specific, warm, with just a touch of personality. Never generic.",
