@@ -753,10 +753,10 @@ Return ONLY valid JSON, no markdown, no backticks, no comments:
 });
 
 // ─────────────────────────────────────────────────────────────────
-// LOCAL TASTE  — DB-cached, shared across all users
+// LOCAL TASTE  — Supabase-cached, shared across all users
 // Key: destination normalised to lowercase + trimmed
 // ─────────────────────────────────────────────────────────────────
-const db = require('../lib/prisma');
+const sb = require('../lib/supabase');
 
 router.post('/local-taste', async (req, res) => {
   const { destination } = req.body;
@@ -767,13 +767,18 @@ router.post('/local-taste', async (req, res) => {
 
   // ── Cache hit: return stored data immediately ──────────────────
   try {
-    const cached = await db.destinationTaste.findUnique({ where: { destination: destKey } });
-    if (cached) {
+    const { data: cached, error: cacheErr } = await sb
+      .from('destination_taste')
+      .select('data')
+      .eq('destination', destKey)
+      .maybeSingle();
+    if (cached && !cacheErr) {
       console.log(`⚡ [LOCAL TASTE] Cache hit: ${destKey}`);
       return res.json(cached.data);
     }
+    if (cacheErr) console.warn('⚠️  [LOCAL TASTE] Supabase read error:', cacheErr.message);
   } catch (dbErr) {
-    console.warn('⚠️  [LOCAL TASTE] DB read failed, continuing to generate:', dbErr.message);
+    console.warn('⚠️  [LOCAL TASTE] Supabase read failed, continuing to generate:', dbErr.message);
   }
 
   // ── Cache miss: generate, then persist ────────────────────────
@@ -859,16 +864,15 @@ Rules:
     const data = await parseOrRepair(tasteText, 'local taste');
     console.log(`✅ [LOCAL TASTE] ${data.dishes?.length} dishes, ${data.places?.length} places`);
 
-    // ── Persist to DB (upsert in case of race condition) ──────────
+    // ── Persist to Supabase (upsert in case of race condition) ─────
     try {
-      await db.destinationTaste.upsert({
-        where:  { destination: destKey },
-        create: { destination: destKey, data },
-        update: { data, updatedAt: new Date() },
-      });
-      console.log(`💾 [LOCAL TASTE] Saved to DB: ${destKey}`);
+      const { error: writeErr } = await sb
+        .from('destination_taste')
+        .upsert({ destination: destKey, data, updated_at: new Date().toISOString() });
+      if (writeErr) throw writeErr;
+      console.log(`💾 [LOCAL TASTE] Saved to Supabase: ${destKey}`);
     } catch (dbErr) {
-      console.warn('⚠️  [LOCAL TASTE] DB write failed (non-fatal):', dbErr.message);
+      console.warn('⚠️  [LOCAL TASTE] Supabase write failed (non-fatal):', dbErr.message);
     }
 
     res.json(data);
@@ -880,11 +884,11 @@ Rules:
 });
 
 // ─────────────────────────────────────────────────────────────────
-// PHOTOS — ImageKit (primary cache) → Serper Images → Wikimedia Commons
-// Folders:
-//   /tb-photos/auto/  — auto-generated (destination, activity, dish)
-//   /tb-photos/user/  — user-uploaded trip photos
-// Cache: 6 hours in-memory to avoid repeat IK checks
+// PHOTOS — ImageKit (primary) → Serper Images → Wikimedia Commons
+// Cache hierarchy:
+//   L1: in-memory Map (fast, per-process, 6h TTL)
+//   L2: Supabase table photo_url_cache (persistent across restarts)
+//   L3: IK HEAD check → upload → serve IK URL
 // ─────────────────────────────────────────────────────────────────
 const photoCache     = new Map();
 const PHOTO_CACHE_MS = 6 * 60 * 60 * 1000;
@@ -982,7 +986,27 @@ router.get('/photos', async (req, res) => {
   const { q } = req.query;
   if (!q) return res.status(400).json({ error: 'q is required' });
 
+  // L1: in-memory
   if (photoCache.has(q)) return res.json({ urls: photoCache.get(q) });
+
+  // L2: Supabase persistent cache
+  try {
+    const { data: sbRow } = await sb
+      .from('photo_url_cache')
+      .select('urls')
+      .eq('query', q)
+      .gt('expires_at', new Date().toISOString())
+      .maybeSingle();
+    if (sbRow?.urls) {
+      const urls = sbRow.urls;
+      photoCache.set(q, urls);
+      setTimeout(() => photoCache.delete(q), PHOTO_CACHE_MS);
+      console.log(`📸 [PHOTOS] "${q}" → Supabase L2 hit`);
+      return res.json({ urls });
+    }
+  } catch (sbErr) {
+    console.warn(`⚠️ [PHOTOS] Supabase L2 read failed for "${q}":`, sbErr.message);
+  }
 
   const filename  = ikNormalize(q);
   const ikUrl     = ikAutoUrl(filename);
@@ -1030,6 +1054,18 @@ router.get('/photos', async (req, res) => {
 
   photoCache.set(q, finalUrls);
   setTimeout(() => photoCache.delete(q), PHOTO_CACHE_MS);
+
+  // Persist to Supabase L2 (async, don't block response)
+  if (finalUrls.length > 0) {
+    const expiresAt = new Date(Date.now() + PHOTO_CACHE_MS).toISOString();
+    sb.from('photo_url_cache')
+      .upsert({ query: q, urls: finalUrls, expires_at: expiresAt })
+      .then(({ error }) => {
+        if (error) console.warn(`⚠️ [PHOTOS] Supabase L2 write failed for "${q}":`, error.message);
+      })
+      .catch(err => console.warn(`⚠️ [PHOTOS] Supabase L2 write failed for "${q}":`, err.message));
+  }
+
   console.log(`📸 [PHOTOS] "${q}" → ${finalUrls.length} via ${source}`);
   res.json({ urls: finalUrls });
 });
