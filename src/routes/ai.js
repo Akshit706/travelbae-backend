@@ -10,6 +10,7 @@
 // ═══════════════════════════════════════════════════════════════════
 
 const express = require('express');
+const crypto  = require('crypto');
 const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
@@ -879,12 +880,49 @@ Rules:
 });
 
 // ─────────────────────────────────────────────────────────────────
-// PHOTOS — Serper Images (primary) → Wikimedia Commons (fallback)
-// Cache: 6 hours — photos don't change between sessions
+// PHOTOS — ImageKit (primary cache) → Serper Images → Wikimedia Commons
+// Folders:
+//   /tb-photos/auto/  — auto-generated (destination, activity, dish)
+//   /tb-photos/user/  — user-uploaded trip photos
+// Cache: 6 hours in-memory to avoid repeat IK checks
 // ─────────────────────────────────────────────────────────────────
 const photoCache     = new Map();
 const PHOTO_CACHE_MS = 6 * 60 * 60 * 1000;
 const PHOTO_NOISE    = /flag|logo|map|seal|coat|icon|emblem|portrait|locator|location|blank|outline|stub/i;
+const IK_UPLOAD_URL  = 'https://upload.imagekit.io/api/v1/files/upload';
+const IK_API_URL     = 'https://api.imagekit.io/v1';
+
+function ikAuthHeader() {
+  return 'Basic ' + Buffer.from((process.env.IMAGEKIT_PRIVATE_KEY || '') + ':').toString('base64');
+}
+function ikNormalize(q) {
+  return q.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 120);
+}
+function ikAutoUrl(filename) {
+  const base = (process.env.IMAGEKIT_URL_ENDPOINT || '').replace(/\/$/, '');
+  return `${base}/tb-photos/auto/${filename}.jpg`;
+}
+async function ikExists(url) {
+  try {
+    const r = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(3000) });
+    return r.ok;
+  } catch { return false; }
+}
+async function ikUploadFromUrl(sourceUrl, filename) {
+  const form = new FormData();
+  form.append('file', sourceUrl);       // IK accepts a URL directly
+  form.append('fileName', filename + '.jpg');
+  form.append('folder', '/tb-photos/auto');
+  form.append('useUniqueFileName', 'false');
+  const res = await fetch(IK_UPLOAD_URL, {
+    method: 'POST',
+    headers: { Authorization: ikAuthHeader() },
+    body: form,
+  });
+  const data = await res.json();
+  if (!data.url) throw new Error(`IK upload failed: ${data.message || JSON.stringify(data)}`);
+  return data.url;
+}
 
 // ── Serper Images ────────────────────────────────────────────────
 async function serperImageSearch(q) {
@@ -929,7 +967,6 @@ async function commonsSearch(q, limit = 15) {
     })
     .map(p => p.imageinfo[0].thumburl || p.imageinfo[0].url);
 }
-
 async function wikimediaFallback(q) {
   let urls = await commonsSearch(`${q} monument landmark historic`);
   if (urls.length < 3) urls = [...new Set([...urls, ...await commonsSearch(q)])];
@@ -947,33 +984,74 @@ router.get('/photos', async (req, res) => {
 
   if (photoCache.has(q)) return res.json({ urls: photoCache.get(q) });
 
-  let urls = [];
-  let source = 'none';
+  const filename  = ikNormalize(q);
+  const ikUrl     = ikAutoUrl(filename);
+  const ikEnabled = !!(process.env.IMAGEKIT_PRIVATE_KEY && process.env.IMAGEKIT_URL_ENDPOINT);
 
-  // 1. Serper Images (primary)
+  // 1. ImageKit cache check
+  if (ikEnabled && await ikExists(ikUrl)) {
+    console.log(`📸 [PHOTOS] "${q}" → ImageKit hit`);
+    photoCache.set(q, [ikUrl]);
+    setTimeout(() => photoCache.delete(q), PHOTO_CACHE_MS);
+    return res.json({ urls: [ikUrl] });
+  }
+
+  // 2. Serper Images (primary source)
+  let rawUrls = [];
+  let source  = 'none';
   try {
-    urls = await serperImageSearch(q);
-    if (urls.length > 0) source = 'serper';
+    rawUrls = await serperImageSearch(q);
+    if (rawUrls.length > 0) source = 'serper';
   } catch (err) {
     console.warn(`⚠️ [PHOTOS] Serper failed for "${q}": ${err.message}`);
   }
 
-  // 2. Wikimedia fallback if Serper returned nothing
-  if (urls.length === 0) {
+  // 3. Wikimedia fallback
+  if (rawUrls.length === 0) {
     try {
-      urls = await wikimediaFallback(q);
-      if (urls.length > 0) source = 'wikimedia';
+      rawUrls = await wikimediaFallback(q);
+      if (rawUrls.length > 0) source = 'wikimedia';
     } catch (err) {
       console.warn(`⚠️ [PHOTOS] Wikimedia failed for "${q}": ${err.message}`);
     }
   }
 
-  // Cache even empty results to avoid re-hammering APIs
-  photoCache.set(q, urls);
-  setTimeout(() => photoCache.delete(q), PHOTO_CACHE_MS);
+  // 4. Upload first URL to ImageKit (fire-and-forget style — don't block response)
+  let finalUrls = rawUrls;
+  if (rawUrls.length > 0 && ikEnabled) {
+    try {
+      const uploaded = await ikUploadFromUrl(rawUrls[0], filename);
+      finalUrls = [uploaded, ...rawUrls.slice(1)];
+      source += '+imagekit';
+    } catch (err) {
+      console.warn(`⚠️ [PHOTOS] IK upload failed for "${q}": ${err.message}`);
+    }
+  }
 
-  console.log(`📸 [PHOTOS] "${q}" → ${urls.length} images via ${source}`);
-  res.json({ urls });
+  photoCache.set(q, finalUrls);
+  setTimeout(() => photoCache.delete(q), PHOTO_CACHE_MS);
+  console.log(`📸 [PHOTOS] "${q}" → ${finalUrls.length} via ${source}`);
+  res.json({ urls: finalUrls });
+});
+
+// ─────────────────────────────────────────────────────────────────
+// IMAGEKIT AUTH — generate upload credentials for frontend direct upload
+// Frontend uses these to upload user photos straight to ImageKit
+// without the file going through our backend server
+// ─────────────────────────────────────────────────────────────────
+router.get('/imagekit-auth', (req, res) => {
+  const privateKey = process.env.IMAGEKIT_PRIVATE_KEY;
+  if (!privateKey) return res.status(500).json({ error: 'ImageKit not configured' });
+  const token     = crypto.randomUUID();
+  const expire    = Math.floor(Date.now() / 1000) + 3600;     // 1 hour
+  const signature = crypto.createHmac('sha1', privateKey).update(token + expire).digest('hex');
+  res.json({
+    token,
+    expire,
+    signature,
+    publicKey:   process.env.IMAGEKIT_PUBLIC_KEY,
+    urlEndpoint: process.env.IMAGEKIT_URL_ENDPOINT,
+  });
 });
 
 module.exports = router;
