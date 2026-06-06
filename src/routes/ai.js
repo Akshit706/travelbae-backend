@@ -568,7 +568,7 @@ Extract up to ${maxAttractions} attractions, ${maxRestaurants} restaurants, ${ma
 
 QUALITY STANDARD — mandatory for every meal and activity:
 Every restaurant, café, or food stop must be a named, established place with a real reputation — the kind featured in Lonely Planet, Condé Nast Traveller, food blogs, or local top-10 lists. No unnamed roadside stalls, no generic "local dhaba", no "chai wala" unless it is a genuinely famous institution known by name in travel editorial. If the restaurant pool below does not have enough quality options for a meal slot, replace that slot with a neighbourhood walk, a scenic stop, or a market browse — never invent a mediocre vendor.
-The same standard applies to attractions: iconic, historic, famous, or trending — not just "a temple" or "a local area".`
+The same standard applies to attractions: iconic, historic, famous, or trending — not just "a temple" or "a local area".
 
 AVAILABLE ATTRACTIONS (use only these; do not invent new ones):
 ${attractionPool}
@@ -878,11 +878,36 @@ Rules:
 });
 
 // ─────────────────────────────────────────────────────────────────
-// PHOTOS — Wikimedia Commons, 1-hour cache
+// PHOTOS — Serper Images (primary) → Wikimedia Commons (fallback)
+// Cache: 6 hours — photos don't change between sessions
 // ─────────────────────────────────────────────────────────────────
-const photoCache  = new Map();
-const PHOTO_NOISE = /flag|logo|map|seal|coat|icon|emblem|portrait|locator|location|blank|outline|stub/i;
+const photoCache     = new Map();
+const PHOTO_CACHE_MS = 6 * 60 * 60 * 1000;
+const PHOTO_NOISE    = /flag|logo|map|seal|coat|icon|emblem|portrait|locator|location|blank|outline|stub/i;
 
+// ── Serper Images ────────────────────────────────────────────────
+async function serperImageSearch(q) {
+  const key = process.env.SERPER_PHOTOS_API_KEY;
+  if (!key) throw new Error('SERPER_PHOTOS_API_KEY not set');
+  const res = await fetch('https://google.serper.dev/images', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-API-KEY': key },
+    body: JSON.stringify({ q: `${q} travel photo`, num: 8, gl: 'in', hl: 'en' }),
+  });
+  if (!res.ok) throw new Error(`Serper Images HTTP ${res.status}`);
+  const data = await res.json();
+  if (data.error) throw new Error(`Serper Images: ${data.error}`);
+  return (data.images || [])
+    .filter(img =>
+      img.imageUrl &&
+      /\.(jpg|jpeg|png|webp)/i.test(img.imageUrl) &&
+      !PHOTO_NOISE.test((img.title || '').toLowerCase())
+    )
+    .map(img => img.imageUrl)
+    .slice(0, 3);
+}
+
+// ── Wikimedia Commons (fallback) ─────────────────────────────────
 async function commonsSearch(q, limit = 15) {
   const url =
     `https://commons.wikimedia.org/w/api.php?action=query` +
@@ -904,25 +929,50 @@ async function commonsSearch(q, limit = 15) {
     .map(p => p.imageinfo[0].thumburl || p.imageinfo[0].url);
 }
 
+async function wikimediaFallback(q) {
+  let urls = await commonsSearch(`${q} monument landmark historic`);
+  if (urls.length < 3) urls = [...new Set([...urls, ...await commonsSearch(q)])];
+  if (urls.length < 3) {
+    const bare = q.split(',')[0].trim();
+    if (bare !== q) urls = [...new Set([...urls, ...await commonsSearch(bare)])];
+  }
+  return urls.slice(0, 3);
+}
+
+// ── Route ────────────────────────────────────────────────────────
 router.get('/photos', async (req, res) => {
   const { q } = req.query;
   if (!q) return res.status(400).json({ error: 'q is required' });
+
   if (photoCache.has(q)) return res.json({ urls: photoCache.get(q) });
+
+  let urls = [];
+  let source = 'none';
+
+  // 1. Serper Images (primary)
   try {
-    let urls = await commonsSearch(`${q} monument landmark historic`);
-    if (urls.length < 3) urls = [...new Set([...urls, ...await commonsSearch(q)])];
-    if (urls.length < 3) {
-      const bare = q.split(',')[0].trim();
-      if (bare !== q) urls = [...new Set([...urls, ...await commonsSearch(bare)])];
-    }
-    const result = urls.slice(0, 3);
-    photoCache.set(q, result);
-    setTimeout(() => photoCache.delete(q), 60 * 60 * 1000);
-    res.json({ urls: result });
+    urls = await serperImageSearch(q);
+    if (urls.length > 0) source = 'serper';
   } catch (err) {
-    console.error('Photos error:', err.message);
-    res.status(500).json({ error: 'Could not fetch photos' });
+    console.warn(`⚠️ [PHOTOS] Serper failed for "${q}": ${err.message}`);
   }
+
+  // 2. Wikimedia fallback if Serper returned nothing
+  if (urls.length === 0) {
+    try {
+      urls = await wikimediaFallback(q);
+      if (urls.length > 0) source = 'wikimedia';
+    } catch (err) {
+      console.warn(`⚠️ [PHOTOS] Wikimedia failed for "${q}": ${err.message}`);
+    }
+  }
+
+  // Cache even empty results to avoid re-hammering APIs
+  photoCache.set(q, urls);
+  setTimeout(() => photoCache.delete(q), PHOTO_CACHE_MS);
+
+  console.log(`📸 [PHOTOS] "${q}" → ${urls.length} images via ${source}`);
+  res.json({ urls });
 });
 
 module.exports = router;
