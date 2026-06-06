@@ -963,13 +963,28 @@ async function ikUploadFromUrl(sourceUrl, filename) {
 }
 
 // ── Serper Images ────────────────────────────────────────────────
+// Smart suffix: food/dish queries → no generic suffix (dish names don't need
+// "travel photo"); attraction/shopping → "photo high resolution"
+function photoSearchQuery(q) {
+  const ql = q.toLowerCase();
+  if (/\bfood\b|\bdish\b|\brestaurant\b|\bcuisine\b|\bstreet food\b|\bcafe\b|\bsweet\b/.test(ql)) {
+    // For food: just the name, Serper already knows
+    return q;
+  }
+  if (/\bhotel\b|\bstay\b|\bresort\b/.test(ql)) {
+    return `${q} exterior interior`;
+  }
+  // Attraction / experience / shopping — use clean "photo" suffix
+  return `${q} photo`;
+}
+
 async function serperImageSearch(q) {
   const key = process.env.SERPER_PHOTOS_API_KEY;
   if (!key) throw new Error('SERPER_PHOTOS_API_KEY not set');
   const res = await fetch('https://google.serper.dev/images', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-API-KEY': key },
-    body: JSON.stringify({ q: `${q} travel photo`, num: 8, gl: 'in', hl: 'en' }),
+    body: JSON.stringify({ q: photoSearchQuery(q), num: 10, gl: 'in', hl: 'en' }),
   });
   if (!res.ok) throw new Error(`Serper Images HTTP ${res.status}`);
   const data = await res.json();

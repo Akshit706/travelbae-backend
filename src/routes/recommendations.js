@@ -23,6 +23,11 @@ router.use(authenticate);
 // CONFIG
 // ─────────────────────────────────────────────────────────────────
 const SERPER_PLACES_URL   = 'https://google.serper.dev/places';
+// Fall back to the main Serper key if the dedicated recs key is not set on
+// the deployment host (so Render works without a separate env var)
+function serperRecsKey() {
+  return process.env.SERPER_RECS_API_KEY || process.env.SERPER_API_KEY || '';
+}
 const GEOAPIFY_GEOCODE    = 'https://api.geoapify.com/v1/geocode/search';
 const GEOAPIFY_PLACES     = 'https://api.geoapify.com/v2/places';
 const CACHE_MAX_AGE_MS    = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -37,7 +42,7 @@ async function serperPlaces(query) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-API-KEY': process.env.SERPER_RECS_API_KEY,
+        'X-API-KEY': serperRecsKey(),
       },
       body: JSON.stringify({ q: query, gl: 'in', hl: 'en' }),
     });
