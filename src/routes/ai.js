@@ -779,10 +779,10 @@ router.post('/local-taste', async (req, res) => {
   console.log(`\n🍜 LOCAL TASTE: ${destination} (generating…)`);
   try {
     const searchResults = await serperMultiSearch([
-      `${destination} must eat iconic local dishes authentic cuisine what to eat`,
-      `${destination} famous street food stalls best local restaurants named places`,
-      `${destination} unique food experiences cooking class market food tour`,
-      `${destination} signature dish regional specialty food culture`,
+      `${destination} most iconic must-eat dishes famous regional food specialty`,
+      `${destination} legendary renowned acclaimed restaurants institutions top-rated`,
+      `${destination} signature culinary experience famous food market heritage cooking`,
+      `${destination} best restaurants Michelin Lonely Planet Conde Nast food guide`,
     ], 10);
     const { context } = await buildResearchContext(searchResults, 5);
 
@@ -792,10 +792,11 @@ RESEARCH CONTEXT:
 ${context}
 
 QUALITY BAR — an item only makes the list if it passes ALL of these:
-1. It is specifically named (a real dish name, a real place name — not "local curry" or "street market")
-2. It is mentioned or implied in the research context above
-3. It is something a knowledgeable local or food critic would vouch for
-4. It would genuinely disappoint a traveller if they missed it
+1. It is specifically named (a real dish name, a real establishment name — never "local curry", "roadside stall", or "street market")
+2. It is explicitly mentioned or strongly implied in the research context above
+3. It is famous or regionally defining — the kind of thing written about in Lonely Planet, food magazines, or award lists
+4. It would genuinely disappoint a knowledgeable traveller if they missed it
+5. For PLACES: it must be a named institution with a reputation — a specific restaurant, a specific stall with a name, a named market. Not just "a good spot". Unnamed vendors, generic dhabas, and "local tea shops" do not qualify unless they are famous institutions known by name in travel writing.
 
 For DISHES: include only the signature, regionally-defining dishes of ${destination}. The kind you read about before you visit. Describe what makes THIS version unique vs elsewhere.
 For PLACES: only include restaurants, stalls, or markets that are named institutions — places with a reputation, a history, or a loyal following. Not just "a good place for pad thai".
