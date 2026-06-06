@@ -630,22 +630,36 @@ Day 1 — ALWAYS start with hotel check-in (type: "hotel", icon: "🏨", name: "
 Day ${clampedDays} — End the day with an airport/station transfer (type: "transport", icon: "🚕", name: "Transfer to Airport / Station"). Before checkout, a final breakfast and one very short, sentimental farewell activity (a last cup of coffee at a favourite spot, a quick market stop for souvenirs) — nothing time-consuming.
 
 ── RULE 5: DAY SHAPE ──
-Build each day like a story arc with a natural rhythm:
-  08:00 AM  Breakfast — specific restaurant + exact dish
-  09:30 AM  Morning activity (medium or high energy is fine here — body is fresh)
-  11:30 AM  (optional) second nearby morning spot, only if low/medium energy
-  01:00 PM  Lunch — specific restaurant + exact dish. Rest for 30 min after if previous activity was high-energy.
-  02:30 PM  Afternoon activity — MUST be low or medium energy (it's hot; people are tired)
-  05:00 PM  Golden hour activity — viewpoint, riverside stroll, market, sunset spot
-  07:30 PM  Dinner — specific restaurant + exact dish
+Build each day like a story arc. Use these as anchor points — but the ACTUAL times flow from activity durations, not from these slots:
+  ~08:00 AM  Breakfast (30–45 min sit-down, or 20 min if grab-and-go)
+  ~09:00 AM  Morning activity (medium or high energy — body is fresh)
+  ~11:30 AM  Second morning spot if nearby and low/medium energy
+  ~01:00 PM  Lunch (45–60 min)
+  ~02:30 PM  Afternoon activity — MUST be low or medium energy (hot, tired)
+  ~05:00 PM  Golden hour — viewpoint, riverside, market, sunset spot
+  ~07:30 PM  Dinner (60–90 min)
 Target ${activitiesPerDay} activities per day (Day 1: fewer due to arrival; Day ${clampedDays}: fewer due to checkout).
 
-── RULE 6: TIME LOGIC & END TIMES ──
-For EVERY activity, compute and output:
-  • "time": start time (HH:MM AM/PM)
-  • "endTime": start time + duration (HH:MM AM/PM)
-  • "travelToNext": how long and how to get to the NEXT activity, e.g. "10 min walk", "20 min tuk-tuk", "5 min taxi" — omit only for the last activity of the day
-End time of activity N must be ≤ start time of activity N+1 minus travelToNext. Never overlap. Always include endTime.
+── RULE 6: STRICT TIME-CHAIN — EVERY MINUTE MUST BE ACCOUNTED FOR ──
+This is the most important rule. Times must form an unbroken chain with ZERO silent gaps.
+
+The chain formula is rigid:
+  startTime(N+1) = endTime(N) + travelToNext(N)
+
+MANDATORY fields for EVERY activity:
+  • "time"        — start time in 12h format "HH:MM AM/PM"
+  • "endTime"     — time + duration, computed exactly, same format
+  • "travelToNext"— how to get to the NEXT activity and how long it takes. Format: "12 min auto-rickshaw through Chandni Chowk" or "8 min walk down the ghats" — specific, vivid, never just "taxi". OMIT only for the very last activity of the day.
+
+VERIFICATION — before writing the next activity's "time", do this arithmetic explicitly in your head:
+  endTime(N) + travel_minutes(N) = startTime(N+1)
+  Example: ends 11:30 AM + 20 min auto = 11:50 AM. Next activity starts 11:50 AM. NOT 12:00 PM, NOT 1:00 PM.
+
+FORBIDDEN: any gap > 0 minutes between endTime(N) + travelToNext(N) and startTime(N+1). If there is unavoidable downtime (post-lunch rest, waiting for golden hour), make it an explicit low-energy activity:
+  { "name": "Rest & Refresh at Hotel", "type": "rest", "duration": "30 min", "note": "..." }
+  OR
+  { "name": "Chai & People-Watching at [café name]", "type": "food", "duration": "45 min", "note": "..." }
+Never leave a gap. Every minute has a plan.
 
 ── RULE 7: OPENING HOURS — STRICT SCHEDULING GATE ──
 Every attraction/market/restaurant must pass this check BEFORE you schedule it:
@@ -692,7 +706,8 @@ If named places run out for later days, use: a named neighbourhood walk (give th
 ── RULE 11: proTip ──
 One genuinely specific, actionable insider tip per day. Not "carry water" or "wear sunscreen". Something that sounds like advice from someone who's been there — direct, specific, occasionally a dry observation when it fits naturally. E.g. "The queue at X forms before 8 AM — arrive at 7:45 and you'll walk straight in." or "Ask for the off-menu Y dish at Z — it's not on the board but locals always order it."
 
-Return ONLY valid JSON, no markdown, no backticks, no comments:
+Return ONLY valid JSON, no markdown, no backticks, no comments.
+BEFORE writing the JSON, silently verify: for every consecutive pair of activities on the same day, endTime(N) + parse(travelToNext(N)) == startTime(N+1). Fix any mismatch before outputting.
 {
   "headline": "compelling ${clampedDays}-day title",
   "summary": "2-sentence hook that makes the reader immediately want to go — specific, warm, with just a touch of personality. Never generic.",
@@ -711,7 +726,7 @@ Return ONLY valid JSON, no markdown, no backticks, no comments:
         {
           "time": "02:00 PM",
           "endTime": "03:00 PM",
-          "travelToNext": "5 min walk",
+          "travelToNext": "7 min walk down the main bazaar to the next spot",
           "name": "Hotel Check-in & Freshen Up",
           "type": "hotel",
           "energyLevel": "rest",
