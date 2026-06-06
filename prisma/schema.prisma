@@ -130,6 +130,57 @@ model DestinationTaste {
   @@index([destination])
 }
 
+// Recommendations: hotels, hospitals, rentals — one row per place per destination
+// Shared across all users; refreshed monthly via GET /ai/recommendations
+
+model DestinationHotel {
+  id            String   @id @default(cuid())
+  destination   String   // normalised lowercase e.g. "udaipur"
+  name          String
+  rating        Float?
+  priceLevel    String?  // budget | mid | luxury
+  pricePerNight String?
+  imageUrl      String?
+  address       String?
+  lat           Float?
+  lng           Float?
+  amenities     String[] @default([])
+  fetchedAt     DateTime @default(now())
+
+  @@index([destination])
+}
+
+model DestinationHospital {
+  id          String   @id @default(cuid())
+  destination String
+  name        String
+  category    String   // hospital | clinic | pharmacy | emergency
+  is24h       Boolean  @default(false)
+  phone       String?
+  address     String?
+  lat         Float?
+  lng         Float?
+  fetchedAt   DateTime @default(now())
+
+  @@index([destination])
+}
+
+model DestinationRental {
+  id          String   @id @default(cuid())
+  destination String
+  name        String
+  type        String   // car | bike | scooter | cycle
+  rating      Float?
+  phone       String?
+  address     String?
+  lat         Float?
+  lng         Float?
+  mapsUrl     String?
+  fetchedAt   DateTime @default(now())
+
+  @@index([destination])
+}
+
 model ClubProfile {
   id          String   @id @default(cuid())
   tripId       String   @unique

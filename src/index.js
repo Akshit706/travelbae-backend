@@ -12,7 +12,8 @@ const expenseRoutes   = require('./routes/expenses');
 const contactRoutes   = require('./routes/contacts');
 const photoRoutes     = require('./routes/photos');
 const itineraryRoutes = require('./routes/itinerary');
-const aiRoutes        = require('./routes/ai');
+const aiRoutes            = require('./routes/ai');
+const recommendationRoutes = require('./routes/recommendations');
 
 
 const app = express();
@@ -38,6 +39,7 @@ app.use('/trips',     contactRoutes);
 app.use('/trips',     photoRoutes);
 app.use('/trips',     itineraryRoutes);
 app.use('/ai',        aiRoutes);
+app.use('/ai',        recommendationRoutes);
 
 // Global error handler — catches any unhandled errors
 app.use((err, req, res, next) => {
