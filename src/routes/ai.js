@@ -1032,27 +1032,9 @@ router.get('/photos', async (req, res) => {
   const ikUrl     = ikAutoUrl(filename);
   const ikEnabled = !!(process.env.IMAGEKIT_PRIVATE_KEY && process.env.IMAGEKIT_URL_ENDPOINT);
 
-  // 1. ImageKit cache check — if IK has it, try to get the full URL set from Supabase (no TTL filter)
+  // 1. ImageKit cache check
   if (ikEnabled && await ikExists(ikUrl)) {
-    try {
-      const { data: sbFull } = await sb
-        .from('photo_url_cache')
-        .select('urls')
-        .eq('query', q)
-        .maybeSingle();
-      if (sbFull?.urls?.length > 0) {
-        const urls = sbFull.urls;
-        photoCache.set(q, urls);
-        setTimeout(() => photoCache.delete(q), PHOTO_CACHE_MS);
-        // Refresh Supabase TTL
-        const expiresAt = new Date(Date.now() + PHOTO_CACHE_MS).toISOString();
-        sb.from('photo_url_cache').upsert({ query: q, urls, expires_at: expiresAt }).catch(() => {});
-        console.log(`📸 [PHOTOS] "${q}" → IK hit + Supabase full (${urls.length} urls)`);
-        return res.json({ urls });
-      }
-    } catch {}
-    // Supabase has nothing — return just the IK URL
-    console.log(`📸 [PHOTOS] "${q}" → ImageKit hit (1 url)`);
+    console.log(`📸 [PHOTOS] "${q}" → ImageKit hit`);
     photoCache.set(q, [ikUrl]);
     setTimeout(() => photoCache.delete(q), PHOTO_CACHE_MS);
     return res.json({ urls: [ikUrl] });
