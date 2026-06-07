@@ -19,10 +19,10 @@ const { authenticate } = require('../middleware/auth');
 const router = express.Router();
 router.use(authenticate);
 
-const SERPER_PLACES_URL = 'https://google.serper.dev/places'\;
-const GEOAPIFY_GEOCODE  = 'https://api.geoapify.com/v1/geocode/search'\;
-const GEOAPIFY_PLACES   = 'https://api.geoapify.com/v2/places'\;
-const IK_UPLOAD_URL     = 'https://upload.imagekit.io/api/v1/files/upload'\;
+const SERPER_PLACES_URL = 'https://google.serper.dev/places';
+const GEOAPIFY_GEOCODE  = 'https://api.geoapify.com/v1/geocode/search';
+const GEOAPIFY_PLACES   = 'https://api.geoapify.com/v2/places';
+const IK_UPLOAD_URL     = 'https://upload.imagekit.io/api/v1/files/upload';
 const CACHE_MAX_AGE_MS  = 30 * 24 * 60 * 60 * 1000;
 const HOSP_RADIUS_M     = 20000;
 
@@ -68,6 +68,30 @@ async function batchIK(items, limit = 5) {
     }));
   }
   return map;
+}
+
+// ─── Fetch hotel cover images via Serper Images ───────────────────
+// Used for hotels that Serper Places returned no thumbnailUrl for.
+// Runs in parallel for up to 20 hotels, 1 image each.
+async function fetchHotelImages(hotels) {
+  const SERPER_IMAGES_URL = 'https://google.serper.dev/images';
+  const key = process.env.SERPER_PHOTOS_API_KEY || serperKey();
+  if (!key) return;
+  const noImg = hotels.filter(h => !h.imageUrl).slice(0, 20);
+  if (!noImg.length) return;
+  await Promise.allSettled(noImg.map(async h => {
+    try {
+      const res  = await fetch(SERPER_IMAGES_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-API-KEY': key },
+        body: JSON.stringify({ q: `${h.name} hotel exterior`, num: 3, gl: 'in', hl: 'en' }),
+        signal: AbortSignal.timeout(6000),
+      });
+      const data = await res.json();
+      const imgs = (data.images || []).filter(i => i.imageUrl && /\.(jpg|jpeg|png|webp)/i.test(i.imageUrl));
+      if (imgs.length) h.imageUrl = imgs[0].imageUrl;
+    } catch { /* ignore */ }
+  }));
 }
 
 // ─── Geoapify ────────────────────────────────────────────────────
@@ -191,6 +215,9 @@ async function fetchAll(dest) {
   }
   console.log(`🏨 [RECS] ${hotels.length} stays`);
 
+  // Fill missing images via Serper Images, then upload all to IK
+  await fetchHotelImages(hotels);
+
   // Upload hotel images to IK
   if (ikEnabled()) {
     const withImg = hotels.filter(h=>h.imageUrl).slice(0,30);
@@ -258,7 +285,9 @@ router.get('/recommendations', async (req, res) => {
     const latest = await prisma.destinationHotel.findFirst({
       where: { destination: dest }, orderBy: { fetchedAt: 'desc' }, select: { fetchedAt: true },
     });
-    const isStale = refresh || !latest || Date.now() - latest.fetchedAt.getTime() > CACHE_MAX_AGE_MS;
+    // Also treat as stale if we have hotels but zero hospitals (means previous fetch was broken)
+    const hospCount = latest ? await prisma.destinationHospital.count({ where: { destination: dest } }) : 0;
+    const isStale = refresh || !latest || Date.now() - latest.fetchedAt.getTime() > CACHE_MAX_AGE_MS || hospCount === 0;
 
     if (!isStale) {
       const [hotels, hospitals, rentals] = await Promise.all([
