@@ -13,7 +13,7 @@
 // ═══════════════════════════════════════════════════════════════════
 
 const express = require('express');
-const prisma  = require('../lib/prisma');
+const sb      = require('../lib/supabase');
 const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
@@ -282,34 +282,44 @@ router.get('/recommendations', async (req, res) => {
   if (!dest) return res.status(400).json({ error: 'destination required' });
 
   try {
-    const latest = await prisma.destinationHotel.findFirst({
-      where: { destination: dest }, orderBy: { fetchedAt: 'desc' }, select: { fetchedAt: true },
-    });
-    // Also treat as stale if we have hotels but zero hospitals (means previous fetch was broken)
-    const hospCount = latest ? await prisma.destinationHospital.count({ where: { destination: dest } }) : 0;
-    const isStale = refresh || !latest || Date.now() - latest.fetchedAt.getTime() > CACHE_MAX_AGE_MS || hospCount === 0;
-
-    if (!isStale) {
-      const [hotels, hospitals, rentals] = await Promise.all([
-        prisma.destinationHotel.findMany({ where:{destination:dest}, orderBy:[{rating:'desc'}] }),
-        prisma.destinationHospital.findMany({ where:{destination:dest}, orderBy:[{is24h:'desc'},{name:'asc'}] }),
-        prisma.destinationRental.findMany({ where:{destination:dest}, orderBy:[{rating:'desc'}] }),
-      ]);
-      console.log(`✅ [RECS] Cache hit "${dest}": ${hotels.length}H ${hospitals.length}Hosp ${rentals.length}R`);
-      return res.json({ hotels, hospitals, rentals, destination:dest, fromCache:true, cachedAt:latest.fetchedAt });
+    // ── Check Supabase cache ──────────────────────────────────
+    if (!refresh) {
+      try {
+        const { data: cached, error: cacheErr } = await sb
+          .from('destination_recommendations')
+          .select('data, updated_at')
+          .eq('destination', dest)
+          .maybeSingle();
+        if (cached && !cacheErr) {
+          const age       = Date.now() - new Date(cached.updated_at).getTime();
+          const hospCount = (cached.data?.hospitals || []).length;
+          if (age < CACHE_MAX_AGE_MS && hospCount > 0) {
+            console.log(`⚡ [RECS] Cache hit "${dest}": ${cached.data.hotels?.length}H ${hospCount}Hosp ${cached.data.rentals?.length}R`);
+            return res.json({ ...cached.data, destination: dest, fromCache: true, cachedAt: cached.updated_at });
+          }
+          console.log(`🔄 [RECS] Stale / empty hospitals for "${dest}" — refreshing`);
+        }
+        if (cacheErr) console.warn('[RECS] Supabase read error:', cacheErr.message);
+      } catch (cacheReadErr) {
+        console.warn('[RECS] Supabase read failed, fetching fresh:', cacheReadErr.message);
+      }
     }
 
+    // ── Fetch fresh data ──────────────────────────────────────
     const { hotels, hospitals, rentals } = await fetchAll(dest);
-    await prisma.$transaction(async tx => {
-      await tx.destinationHotel.deleteMany({ where:{destination:dest} });
-      await tx.destinationHospital.deleteMany({ where:{destination:dest} });
-      await tx.destinationRental.deleteMany({ where:{destination:dest} });
-      if (hotels.length)    await tx.destinationHotel.createMany({ data:hotels });
-      if (hospitals.length) await tx.destinationHospital.createMany({ data:hospitals });
-      if (rentals.length)   await tx.destinationRental.createMany({ data:rentals });
-    });
-    console.log(`✅ [RECS] Stored fresh "${dest}": ${hotels.length}H ${hospitals.length}Hosp ${rentals.length}R`);
-    return res.json({ hotels, hospitals, rentals, destination:dest, fromCache:false });
+
+    // ── Persist to Supabase ───────────────────────────────────
+    try {
+      const { error: writeErr } = await sb
+        .from('destination_recommendations')
+        .upsert({ destination: dest, data: { hotels, hospitals, rentals }, updated_at: new Date().toISOString() });
+      if (writeErr) throw writeErr;
+      console.log(`💾 [RECS] Saved to Supabase: "${dest}" — ${hotels.length}H ${hospitals.length}Hosp ${rentals.length}R`);
+    } catch (dbErr) {
+      console.warn('[RECS] Supabase write failed (non-fatal):', dbErr.message);
+    }
+
+    return res.json({ hotels, hospitals, rentals, destination: dest, fromCache: false });
   } catch (err) {
     console.error('[RECS] Error:', err);
     res.status(500).json({ error: err.message || 'Failed' });
