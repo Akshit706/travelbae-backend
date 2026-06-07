@@ -1,15 +1,15 @@
 // src/routes/recommendations.js
 // ═══════════════════════════════════════════════════════════════════
-// Destination Recommendations — Hotels, Hospitals, Rentals
+// Destination Recommendations — Stays, Healthcare, Rentals
 //
-// GET /ai/recommendations?destination=Udaipur
+// GET /ai/recommendations?destination=Udaipur[&refresh=1]
 //
-// • Hotels  → Serper Places API (SERPER_RECS_API_KEY)
-// • Hospitals → Geoapify Geocode + Places API (GEOAPIFY_API_KEY)
-// • Rentals  → Serper Places API (multiple queries)
+// Stays    → 8 targeted Serper Places queries covering every tier
+// Hospitals → Geoapify (primary) + 3 Serper queries (fallback/supplement)
+// Rentals   → 3 Serper Places queries (car / bike / scooter)
 //
-// Results are cached in Postgres per destination for 30 days.
-// All users reading the same destination hit the DB — zero live calls.
+// Cache: Postgres via Prisma for 30 days — zero live calls for users.
+// Images: uploaded to ImageKit on first fetch, stored as IK URLs.
 // ═══════════════════════════════════════════════════════════════════
 
 const express = require('express');
@@ -19,286 +19,271 @@ const { authenticate } = require('../middleware/auth');
 const router = express.Router();
 router.use(authenticate);
 
-// ─────────────────────────────────────────────────────────────────
-// CONFIG
-// ─────────────────────────────────────────────────────────────────
-const SERPER_PLACES_URL   = 'https://google.serper.dev/places';
-// Fall back to the main Serper key if the dedicated recs key is not set on
-// the deployment host (so Render works without a separate env var)
-function serperRecsKey() {
-  return process.env.SERPER_RECS_API_KEY || process.env.SERPER_API_KEY || '';
-}
-const GEOAPIFY_GEOCODE    = 'https://api.geoapify.com/v1/geocode/search';
-const GEOAPIFY_PLACES     = 'https://api.geoapify.com/v2/places';
-const CACHE_MAX_AGE_MS    = 30 * 24 * 60 * 60 * 1000; // 30 days
-const HOSPITAL_RADIUS_M   = 15000; // 15 km radius
+const SERPER_PLACES_URL = 'https://google.serper.dev/places'\;
+const GEOAPIFY_GEOCODE  = 'https://api.geoapify.com/v1/geocode/search'\;
+const GEOAPIFY_PLACES   = 'https://api.geoapify.com/v2/places'\;
+const IK_UPLOAD_URL     = 'https://upload.imagekit.io/api/v1/files/upload'\;
+const CACHE_MAX_AGE_MS  = 30 * 24 * 60 * 60 * 1000;
+const HOSP_RADIUS_M     = 20000;
 
-// ─────────────────────────────────────────────────────────────────
-// SERPER PLACES
-// ─────────────────────────────────────────────────────────────────
+function serperKey()   { return process.env.SERPER_RECS_API_KEY || process.env.SERPER_API_KEY || ''; }
+function geoapifyKey() { return process.env.GEOAPIFY_API_KEY || ''; }
+function ikEnabled()   { return !!(process.env.IMAGEKIT_PRIVATE_KEY && process.env.IMAGEKIT_URL_ENDPOINT); }
+function ikAuth()      { return 'Basic ' + Buffer.from((process.env.IMAGEKIT_PRIVATE_KEY || '') + ':').toString('base64'); }
+
+// ─── Serper Places ───────────────────────────────────────────────
 async function serperPlaces(query) {
   try {
-    const res = await fetch(SERPER_PLACES_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-KEY': serperRecsKey(),
-      },
-      body: JSON.stringify({ q: query, gl: 'in', hl: 'en' }),
+    const res  = await fetch(SERPER_PLACES_URL, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-KEY': serperKey() },
+      body:    JSON.stringify({ q: query, gl: 'in', hl: 'en' }),
     });
     const data = await res.json();
-    return Array.isArray(data.places) ? data.places : [];
-  } catch (err) {
-    console.warn(`[SERPER_PLACES] "${query}" failed:`, err.message);
-    return [];
-  }
+    if (!Array.isArray(data.places)) { if (data.error) console.warn(`[SERPER] "${query}":`, data.error); return []; }
+    return data.places;
+  } catch (e) { console.warn(`[SERPER] "${query}" failed:`, e.message); return []; }
 }
 
-// ─────────────────────────────────────────────────────────────────
-// GEOAPIFY — geocode city → lat/lon
-// ─────────────────────────────────────────────────────────────────
-async function geocodeCity(city) {
-  const url =
-    `${GEOAPIFY_GEOCODE}?text=${encodeURIComponent(city + ', India')}` +
-    `&limit=1&apiKey=${process.env.GEOAPIFY_API_KEY}`;
-  const res  = await fetch(url);
-  const data = await res.json();
-  const feat = data.features?.[0];
-  if (!feat) throw new Error(`Geocode failed for "${city}"`);
-  return { lat: feat.properties.lat, lon: feat.properties.lon };
+// ─── ImageKit upload ─────────────────────────────────────────────
+function ikFilename(name, dest) {
+  return ('tb_' + dest + '_' + name).toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 100);
 }
-
-// ─────────────────────────────────────────────────────────────────
-// GEOAPIFY — healthcare places near lat/lon
-// ─────────────────────────────────────────────────────────────────
-async function geoapifyHealthcare(lat, lon) {
+async function uploadToIK(srcUrl, filename) {
+  if (!ikEnabled() || !srcUrl) return srcUrl;
   try {
-    const cats = [
-      'healthcare.hospital',
-      'healthcare.clinic_or_praxis',
-      'healthcare.pharmacy',
-      'healthcare.emergency',
-    ].join(',');
-    const url =
-      `${GEOAPIFY_PLACES}?categories=${cats}` +
-      `&filter=circle:${lon},${lat},${HOSPITAL_RADIUS_M}` +
-      `&limit=60&apiKey=${process.env.GEOAPIFY_API_KEY}`;
-    const res  = await fetch(url);
+    const form = new FormData();
+    form.append('file', srcUrl); form.append('fileName', filename + '.jpg');
+    form.append('folder', '/tb-places'); form.append('useUniqueFileName', 'false');
+    const res  = await fetch(IK_UPLOAD_URL, { method: 'POST', headers: { Authorization: ikAuth() }, body: form, signal: AbortSignal.timeout(8000) });
     const data = await res.json();
-    return Array.isArray(data.features) ? data.features : [];
-  } catch (err) {
-    console.warn('[GEOAPIFY_HEALTHCARE] failed:', err.message);
-    return [];
+    return data.url || srcUrl;
+  } catch { return srcUrl; }
+}
+async function batchIK(items, limit = 5) {
+  const map = new Map();
+  for (let i = 0; i < items.length; i += limit) {
+    await Promise.all(items.slice(i, i + limit).map(async it => {
+      map.set(it.name, await uploadToIK(it.imageUrl, ikFilename(it.name, it.dest)));
+    }));
   }
+  return map;
 }
 
-// ─────────────────────────────────────────────────────────────────
-// CLASSIFIERS
-// ─────────────────────────────────────────────────────────────────
-function classifyHotelPrice(name = '', serperPriceLevel = '') {
-  const n = name.toLowerCase();
-  const p = String(serperPriceLevel || '').toLowerCase();
+// ─── Geoapify ────────────────────────────────────────────────────
+async function geocodeCity(city) {
+  const url  = `${GEOAPIFY_GEOCODE}?text=${encodeURIComponent(city + ' India')}&limit=1&apiKey=${geoapifyKey()}`;
+  const res  = await fetch(url, { signal: AbortSignal.timeout(8000) });
+  const data = await res.json();
+  const f    = data.features?.[0];
+  if (!f) throw new Error(`Geocode failed for "${city}"`);
+  return { lat: f.properties.lat, lon: f.properties.lon };
+}
+async function geoapifyHealthcare(lat, lon) {
+  const cats = 'healthcare.hospital,healthcare.clinic_or_praxis,healthcare.pharmacy,healthcare.emergency';
+  const url  = `${GEOAPIFY_PLACES}?categories=${cats}&filter=circle:${lon},${lat},${HOSP_RADIUS_M}&limit=80&apiKey=${geoapifyKey()}`;
+  const res  = await fetch(url, { signal: AbortSignal.timeout(10000) });
+  const data = await res.json();
+  return Array.isArray(data.features) ? data.features : [];
+}
 
-  // Serper returns "$", "$$", "$$$", "$$$$" or descriptive text
-  if (/^\$\$\$\$?$/.test(p.trim()) || p.includes('expensive') || p.includes('very pricey')) return 'luxury';
-  if (/^\$\$$/.test(p.trim())      || p.includes('moderate') || p.includes('mid'))            return 'mid';
-  if (/^\$$/.test(p.trim())        || p.includes('inexpensive') || p.includes('cheap'))        return 'budget';
-
-  // Name-based fallback
-  if (/oberoi|taj |leela|aman |ritz|four seasons|palace hotel|marriott|hyatt|hilton|sheraton|ihg|luxury|5[\s-]?star|five[\s-]?star/.test(n)) return 'luxury';
-  if (/oyo|zostel|budget|hostel|lodge|guesthouse|dharamshala|dormitory|backpacker|economy|cheap/.test(n)) return 'budget';
-
+// ─── Classifiers ─────────────────────────────────────────────────
+function classifyStayType(name, hint) {
+  const n = (name + ' ' + hint).toLowerCase();
+  if (/hostel|dorm|bunk|backpacker|zostel|moustache hostel|so hostel/.test(n)) return 'hostel';
+  if (/homestay|home stay|b&b|bed.?breakfast|farmstay|villa|cottage|pg |paying guest/.test(n)) return 'guesthouse';
+  if (/resort|palace|haveli|fort hotel|heritage hotel|castle|spa resort|safari|camp|tented|eco resort|jungle|treehouse/.test(n)) return 'resort';
+  return 'hotel';
+}
+function classifyPrice(name, stayType, hint) {
+  const n = (name + ' ' + hint).toLowerCase();
+  if (stayType === 'hostel') return 'budget';
+  if (/oberoi|taj \b|leela|aman\b|ritz|four seasons|marriott|hyatt|hilton|sheraton|westin|itc \b|vivanta|radisson|intercontinental|palace hotel|grand hyatt|luxury|5[\s-]?star|five[\s-]?star|premium|royal\b|regal\b/.test(n)) return 'luxury';
+  if (stayType === 'resort') return /budget|economy|cheap/.test(n) ? 'mid' : 'luxury';
+  if (/oyo|zostel|treebo|budget|lodge\b|dharamshala|economy|cheap|affordable|backpacker|under 1000|value inn/.test(n)) return 'budget';
+  if (stayType === 'guesthouse') return 'budget';
   return 'mid';
 }
-
-function detect24h(props) {
-  const oh   = (props.opening_hours || props.datasource?.raw?.opening_hours || '').toLowerCase();
-  const name = (props.name || '').toLowerCase();
-  const cats = (props.categories || []).join(' ').toLowerCase();
-  return (
-    oh.includes('24/7') ||
-    oh.includes('00:00-24:00') ||
-    oh.includes('24 hours') ||
-    cats.includes('emergency') ||
-    /24.?hour|24\/7|round.?the.?clock|all.?night/.test(name)
-  );
+function priceLbl(level, type) {
+  if (type  === 'hostel')   return 'Under ₹700/bed';
+  if (level === 'budget')   return 'Under ₹1,500';
+  if (level === 'luxury')   return '₹5,000+';
+  return '₹1,500–₹4,000';
 }
-
-function hospitalCategory(cats = []) {
-  const c = cats.join(' ').toLowerCase();
-  if (c.includes('emergency')) return 'emergency';
-  if (c.includes('hospital'))  return 'hospital';
-  if (c.includes('pharmacy'))  return 'pharmacy';
+function detect24h(name, cats, oh) {
+  const s = (name + ' ' + (cats||[]).join(' ') + ' ' + (oh||'')).toLowerCase();
+  return /24.?hour|24\/7|round.?the.?clock|all.?night|00:00-24:00|emergency/.test(s);
+}
+function hospCat(name, cats) {
+  const s = (name + ' ' + (cats||[]).join(' ')).toLowerCase();
+  if (/emergency|trauma|casualty/.test(s)) return 'emergency';
+  if (/\bhospital\b/.test(s))              return 'hospital';
+  if (/pharmacy|chemist|drug store|medical store/.test(s)) return 'pharmacy';
   return 'clinic';
 }
-
-function classifyRentalType(name = '', queryHint = '') {
-  const n = (name + ' ' + queryHint).toLowerCase();
-  if (/scooter|scooty|scootie/.test(n))            return 'scooter';
-  if (/\bbike\b|bicycle|cycle(?! rental)/.test(n)) return 'bike';
+function rentalType(name, hint) {
+  const n = (name + ' ' + hint).toLowerCase();
+  if (/scooter|scooty/.test(n))                                    return 'scooter';
+  if (/\bbike\b|motorcycle|motorbike|two.?wheel|enfield|pulsar/.test(n)) return 'bike';
   return 'car';
 }
 
-// ─────────────────────────────────────────────────────────────────
-// MAIN FETCH — runs all three categories in parallel
-// ─────────────────────────────────────────────────────────────────
-async function fetchAllRecommendations(destination) {
-  const display = destination.charAt(0).toUpperCase() + destination.slice(1);
-  console.log(`🔍 [RECS] Fetching recommendations for ${display}…`);
-
-  const [hotelRes, geocodeRes, carRes, bikeRes, scooterRes] = await Promise.allSettled([
-    serperPlaces(`top hotels in ${display}`),
-    geocodeCity(display),
-    serperPlaces(`car rental in ${display}`),
-    serperPlaces(`bike rental in ${display}`),
-    serperPlaces(`scooter scooty rental in ${display}`),
+// ─── Serper hospital fallback ────────────────────────────────────
+async function serperHospitals(city, dest) {
+  const [a, b, c] = await Promise.allSettled([
+    serperPlaces(`hospitals nursing home medical center in ${city}`),
+    serperPlaces(`24 hour emergency clinic casualty in ${city}`),
+    serperPlaces(`pharmacy chemist medical store in ${city}`),
   ]);
-
-  // ── Hotels ──────────────────────────────────────────────────────
-  const hotels = [];
-  if (hotelRes.status === 'fulfilled') {
-    for (const p of hotelRes.value.slice(0, 80)) {
+  const out = []; const seen = new Set();
+  const add = (res, catHint) => {
+    if (res.status !== 'fulfilled') return;
+    for (const p of res.value) {
       if (!p.title) continue;
-      hotels.push({
-        destination,
-        name:          p.title,
-        rating:        p.rating        ? parseFloat(p.rating)    : null,
-        priceLevel:    classifyHotelPrice(p.title, p.priceLevel || ''),
-        pricePerNight: null,
-        imageUrl:      p.thumbnailUrl  || null,
-        address:       p.address       || null,
-        lat:           p.latitude      ? parseFloat(p.latitude)  : null,
-        lng:           p.longitude     ? parseFloat(p.longitude) : null,
-        amenities:     [],
-      });
-    }
-  }
-  console.log(`🏨 [RECS] ${hotels.length} hotels`);
-
-  // ── Hospitals ───────────────────────────────────────────────────
-  const hospitals = [];
-  if (geocodeRes.status === 'fulfilled') {
-    const { lat, lon } = geocodeRes.value;
-    const features = await geoapifyHealthcare(lat, lon);
-    for (const f of features) {
-      const props = f.properties || {};
-      if (!props.name) continue;
-      hospitals.push({
-        destination,
-        name:     props.name,
-        category: hospitalCategory(props.categories || []),
-        is24h:    detect24h(props),
-        phone:    props.contact?.phone || props.datasource?.raw?.phone || null,
-        address:  props.formatted || props.address_line2 || null,
-        lat:      props.lat ? parseFloat(props.lat) : null,
-        lng:      props.lon ? parseFloat(props.lon) : null,
-      });
-    }
-  } else {
-    console.warn('[RECS] Geocode failed:', geocodeRes.reason?.message);
-  }
-  console.log(`🏥 [RECS] ${hospitals.length} hospitals/clinics`);
-
-  // ── Rentals ─────────────────────────────────────────────────────
-  const rentals = [];
-  const seenNames = new Set();
-
-  const addRentals = (result, hint) => {
-    if (result.status !== 'fulfilled') return;
-    for (const p of result.value.slice(0, 25)) {
-      if (!p.title) continue;
-      const key = p.title.toLowerCase();
-      if (seenNames.has(key)) continue;
-      seenNames.add(key);
-      rentals.push({
-        destination,
-        name:    p.title,
-        type:    classifyRentalType(p.title, hint),
-        rating:  p.rating ? parseFloat(p.rating) : null,
-        phone:   p.phoneNumber || null,
-        address: p.address     || null,
-        lat:     p.latitude    ? parseFloat(p.latitude)  : null,
-        lng:     p.longitude   ? parseFloat(p.longitude) : null,
-        mapsUrl: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(p.title + ' ' + display)}`,
-      });
+      const key = p.title.toLowerCase().trim();
+      if (seen.has(key)) continue; seen.add(key);
+      out.push({ destination: dest, name: p.title, category: hospCat(p.title, [catHint]),
+        is24h: detect24h(p.title, [catHint], p.description||''), phone: p.phoneNumber||null,
+        address: p.address||null, lat: p.latitude?parseFloat(p.latitude):null, lng: p.longitude?parseFloat(p.longitude):null });
     }
   };
+  add(a,'hospital'); add(b,'emergency'); add(c,'pharmacy');
+  return out;
+}
 
-  addRentals(carRes,     'car');
-  addRentals(bikeRes,    'bike');
-  addRentals(scooterRes, 'scooter');
+// ─── Main fetch ───────────────────────────────────────────────────
+async function fetchAll(dest) {
+  const city = dest.charAt(0).toUpperCase() + dest.slice(1);
+  console.log(`🔍 [RECS] Fetching fresh data for "${city}"…`);
+
+  const hasGeoapify = geoapifyKey().length > 0;
+  const [h0,h1,h2,h3,h4,h5,h6,h7, geoR, rc,rb,rs] = await Promise.allSettled([
+    serperPlaces(`best hotels in ${city}`),
+    serperPlaces(`cheap budget hotel under 1000 in ${city}`),
+    serperPlaces(`hostel dormitory backpacker stay in ${city}`),
+    serperPlaces(`OYO rooms treebo guesthouse lodge in ${city}`),
+    serperPlaces(`homestay bed breakfast farmstay in ${city}`),
+    serperPlaces(`3 star mid range hotel in ${city}`),
+    serperPlaces(`boutique heritage hotel in ${city}`),
+    serperPlaces(`luxury 5 star palace resort in ${city}`),
+    hasGeoapify ? geocodeCity(city) : Promise.reject(new Error('No Geoapify key')),
+    serperPlaces(`car taxi self drive rental in ${city}`),
+    serperPlaces(`bike motorcycle rental in ${city}`),
+    serperPlaces(`scooter scooty rental in ${city}`),
+  ]);
+
+  // Hotels
+  const hotelSeen = new Set(); const hotels = [];
+  const pairs = [[h0,''],[h1,'budget'],[h2,'hostel'],[h3,'budget'],[h4,'guesthouse'],[h5,'mid'],[h6,'boutique'],[h7,'luxury']];
+  for (const [res, hint] of pairs) {
+    if (res.status !== 'fulfilled') continue;
+    for (const p of res.value) {
+      if (!p.title) continue;
+      const key = p.title.toLowerCase().trim();
+      if (hotelSeen.has(key)) continue; hotelSeen.add(key);
+      const st  = classifyStayType(p.title, hint);
+      const pl  = classifyPrice(p.title, st, hint);
+      hotels.push({ destination:dest, name:p.title, rating:p.rating?parseFloat(p.rating):null,
+        stayType:st, priceLevel:pl, pricePerNight:priceLbl(pl,st),
+        imageUrl:p.thumbnailUrl||null, address:p.address||null,
+        lat:p.latitude?parseFloat(p.latitude):null, lng:p.longitude?parseFloat(p.longitude):null, amenities:[] });
+    }
+  }
+  console.log(`🏨 [RECS] ${hotels.length} stays`);
+
+  // Upload hotel images to IK
+  if (ikEnabled()) {
+    const withImg = hotels.filter(h=>h.imageUrl).slice(0,30);
+    const ikMap   = await batchIK(withImg.map(h=>({name:h.name,dest,imageUrl:h.imageUrl})));
+    for (const h of hotels) { if (ikMap.has(h.name)) h.imageUrl = ikMap.get(h.name); }
+    console.log(`📸 [RECS] IK done for ${withImg.length} hotel images`);
+  }
+
+  // Hospitals
+  let hospitals = [];
+  if (geoR.status === 'fulfilled') {
+    try {
+      const {lat,lon} = geoR.value;
+      const feats = await geoapifyHealthcare(lat, lon);
+      const seen  = new Set();
+      for (const f of feats) {
+        const p = f.properties||{}; if (!p.name) continue;
+        const key = p.name.toLowerCase().trim(); if (seen.has(key)) continue; seen.add(key);
+        const oh = p.opening_hours||p.datasource?.raw?.opening_hours||'';
+        hospitals.push({ destination:dest, name:p.name, category:hospCat(p.name,p.categories||[]),
+          is24h:detect24h(p.name,p.categories||[],oh), phone:p.contact?.phone||p.datasource?.raw?.phone||null,
+          address:p.formatted||p.address_line2||null,
+          lat:p.lat?parseFloat(p.lat):null, lng:p.lon?parseFloat(p.lon):null });
+      }
+      console.log(`🏥 [RECS] ${hospitals.length} via Geoapify`);
+    } catch(e) { console.warn('[RECS] Geoapify healthcare error:', e.message); }
+  } else { console.warn('[RECS] Geocode skipped:', geoR.reason?.message); }
+
+  // Supplement with Serper
+  const serperH  = await serperHospitals(city, dest);
+  const hospSeen = new Set(hospitals.map(h=>h.name.toLowerCase().trim()));
+  for (const h of serperH) {
+    const key = h.name.toLowerCase().trim();
+    if (!hospSeen.has(key)) { hospSeen.add(key); hospitals.push(h); }
+  }
+  const catOrd = {emergency:0,hospital:1,clinic:2,pharmacy:3};
+  hospitals.sort((a,b)=>{if(b.is24h!==a.is24h)return Number(b.is24h)-Number(a.is24h);return(catOrd[a.category]??4)-(catOrd[b.category]??4);});
+  console.log(`🏥 [RECS] ${hospitals.length} total healthcare`);
+
+  // Rentals
+  const rentals = []; const rentalSeen = new Set();
+  const addR = (res, hint) => {
+    if (res.status !== 'fulfilled') return;
+    for (const p of res.value.slice(0,20)) {
+      if (!p.title) continue;
+      const key = p.title.toLowerCase().trim(); if (rentalSeen.has(key)) continue; rentalSeen.add(key);
+      rentals.push({ destination:dest, name:p.title, type:rentalType(p.title,hint),
+        rating:p.rating?parseFloat(p.rating):null, phone:p.phoneNumber||null, address:p.address||null,
+        lat:p.latitude?parseFloat(p.latitude):null, lng:p.longitude?parseFloat(p.longitude):null,
+        mapsUrl:`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(p.title+' '+city)}` });
+    }
+  };
+  addR(rc,'car'); addR(rb,'bike'); addR(rs,'scooter');
   console.log(`🚗 [RECS] ${rentals.length} rentals`);
-
   return { hotels, hospitals, rentals };
 }
 
-// ─────────────────────────────────────────────────────────────────
-// GET /ai/recommendations?destination=Udaipur
-// ─────────────────────────────────────────────────────────────────
+// ─── Route ───────────────────────────────────────────────────────
 router.get('/recommendations', async (req, res) => {
-  const dest = (req.query.destination || '').trim().toLowerCase();
-  if (!dest) return res.status(400).json({ error: 'destination query param is required' });
+  const dest    = (req.query.destination || '').trim().toLowerCase();
+  const refresh = req.query.refresh === '1';
+  if (!dest) return res.status(400).json({ error: 'destination required' });
 
   try {
-    // ── Check cache freshness ──────────────────────────────────────
-    const latestHotel = await prisma.destinationHotel.findFirst({
-      where:   { destination: dest },
-      orderBy: { fetchedAt: 'desc' },
-      select:  { fetchedAt: true },
+    const latest = await prisma.destinationHotel.findFirst({
+      where: { destination: dest }, orderBy: { fetchedAt: 'desc' }, select: { fetchedAt: true },
     });
-
-    const isStale =
-      !latestHotel ||
-      Date.now() - latestHotel.fetchedAt.getTime() > CACHE_MAX_AGE_MS;
+    const isStale = refresh || !latest || Date.now() - latest.fetchedAt.getTime() > CACHE_MAX_AGE_MS;
 
     if (!isStale) {
-      // ── Serve from DB ──────────────────────────────────────────
       const [hotels, hospitals, rentals] = await Promise.all([
-        prisma.destinationHotel.findMany({
-          where:   { destination: dest },
-          orderBy: [{ rating: 'desc' }],
-        }),
-        prisma.destinationHospital.findMany({
-          where:   { destination: dest },
-          orderBy: [{ is24h: 'desc' }, { name: 'asc' }],
-        }),
-        prisma.destinationRental.findMany({
-          where:   { destination: dest },
-          orderBy: [{ rating: 'desc' }],
-        }),
+        prisma.destinationHotel.findMany({ where:{destination:dest}, orderBy:[{rating:'desc'}] }),
+        prisma.destinationHospital.findMany({ where:{destination:dest}, orderBy:[{is24h:'desc'},{name:'asc'}] }),
+        prisma.destinationRental.findMany({ where:{destination:dest}, orderBy:[{rating:'desc'}] }),
       ]);
-      console.log(`✅ [RECS] Cache hit for "${dest}": ${hotels.length}H ${hospitals.length}Hosp ${rentals.length}R`);
-      return res.json({
-        hotels, hospitals, rentals,
-        destination: dest,
-        fromCache: true,
-        cachedAt:  latestHotel.fetchedAt,
-      });
+      console.log(`✅ [RECS] Cache hit "${dest}": ${hotels.length}H ${hospitals.length}Hosp ${rentals.length}R`);
+      return res.json({ hotels, hospitals, rentals, destination:dest, fromCache:true, cachedAt:latest.fetchedAt });
     }
 
-    // ── Fetch fresh data ───────────────────────────────────────────
-    const { hotels, hospitals, rentals } = await fetchAllRecommendations(dest);
-
-    // ── Persist to DB (atomic replace) ────────────────────────────
-    await prisma.$transaction(async (tx) => {
-      await tx.destinationHotel.deleteMany({ where: { destination: dest } });
-      await tx.destinationHospital.deleteMany({ where: { destination: dest } });
-      await tx.destinationRental.deleteMany({ where: { destination: dest } });
-      if (hotels.length)    await tx.destinationHotel.createMany({ data: hotels });
-      if (hospitals.length) await tx.destinationHospital.createMany({ data: hospitals });
-      if (rentals.length)   await tx.destinationRental.createMany({ data: rentals });
+    const { hotels, hospitals, rentals } = await fetchAll(dest);
+    await prisma.$transaction(async tx => {
+      await tx.destinationHotel.deleteMany({ where:{destination:dest} });
+      await tx.destinationHospital.deleteMany({ where:{destination:dest} });
+      await tx.destinationRental.deleteMany({ where:{destination:dest} });
+      if (hotels.length)    await tx.destinationHotel.createMany({ data:hotels });
+      if (hospitals.length) await tx.destinationHospital.createMany({ data:hospitals });
+      if (rentals.length)   await tx.destinationRental.createMany({ data:rentals });
     });
-
-    console.log(`✅ [RECS] Stored fresh data for "${dest}": ${hotels.length}H ${hospitals.length}Hosp ${rentals.length}R`);
-    return res.json({
-      hotels, hospitals, rentals,
-      destination: dest,
-      fromCache: false,
-    });
-
+    console.log(`✅ [RECS] Stored fresh "${dest}": ${hotels.length}H ${hospitals.length}Hosp ${rentals.length}R`);
+    return res.json({ hotels, hospitals, rentals, destination:dest, fromCache:false });
   } catch (err) {
     console.error('[RECS] Error:', err);
-    res.status(500).json({ error: err.message || 'Failed to fetch recommendations' });
+    res.status(500).json({ error: err.message || 'Failed' });
   }
 });
 

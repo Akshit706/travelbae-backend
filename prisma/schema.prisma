@@ -138,8 +138,9 @@ model DestinationHotel {
   destination   String   // normalised lowercase e.g. "udaipur"
   name          String
   rating        Float?
+  stayType      String   @default("hotel") // hotel | hostel | guesthouse | resort
   priceLevel    String?  // budget | mid | luxury
-  pricePerNight String?
+  pricePerNight String?  // e.g. "Under ₹1,000" / "₹1,000–₹3,000" / "₹3,000+"
   imageUrl      String?
   address       String?
   lat           Float?
