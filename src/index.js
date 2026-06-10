@@ -23,8 +23,9 @@ app.use(cors({
   origin: '*', // in production, change this to your actual frontend URL
 }));
 
-// Parse incoming JSON request bodies
-app.use(express.json());
+// Parse incoming JSON request bodies (10 MB limit for image data)
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Health check — visit http://localhost:4000/ to confirm the server is running
 app.get('/', (req, res) => {
