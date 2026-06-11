@@ -70,26 +70,65 @@ async function batchIK(items, limit = 5) {
   return map;
 }
 
-// ─── Fetch hotel cover images via Serper Images ───────────────────
-// Used for hotels that Serper Places returned no thumbnailUrl for.
-// Runs in parallel for up to 20 hotels, 1 image each.
+// ─── Fetch hotel images via Serper Images (up to 5 per hotel) ───────
+// Fetches for ALL hotels (cover + gallery), stored as h.images[].
+// Runs in parallel batches for up to 20 hotels.
 async function fetchHotelImages(hotels) {
   const SERPER_IMAGES_URL = 'https://google.serper.dev/images';
   const key = process.env.SERPER_PHOTOS_API_KEY || serperKey();
   if (!key) return;
-  const noImg = hotels.filter(h => !h.imageUrl).slice(0, 20);
-  if (!noImg.length) return;
-  await Promise.allSettled(noImg.map(async h => {
+  const toFetch = hotels.slice(0, 20);
+  await Promise.allSettled(toFetch.map(async h => {
     try {
-      const res  = await fetch(SERPER_IMAGES_URL, {
+      const queries = [
+        `${h.name} hotel exterior`,
+        `${h.name} hotel room interior`,
+      ];
+      const imgs = [];
+      for (const q of queries) {
+        if (imgs.length >= 5) break;
+        const res = await fetch(SERPER_IMAGES_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-API-KEY': key },
+          body: JSON.stringify({ q, num: 5, gl: 'in', hl: 'en' }),
+          signal: AbortSignal.timeout(7000),
+        });
+        const data = await res.json();
+        const valid = (data.images || [])
+          .filter(i => i.imageUrl && /\.(jpg|jpeg|png|webp)/i.test(i.imageUrl))
+          .map(i => i.imageUrl);
+        imgs.push(...valid);
+      }
+      h.images = [...new Set(imgs)].slice(0, 5);
+      if (!h.imageUrl && h.images.length) h.imageUrl = h.images[0];
+    } catch { /* ignore */ }
+  }));
+}
+
+// ─── Supplement missing phone numbers via Serper web search ──────────
+async function fetchMissingPhones(hotels, city) {
+  const SERPER_SEARCH_URL = 'https://google.serper.dev/search';
+  const key = serperKey();
+  if (!key) return;
+  const noPhone = hotels.filter(h => !h.phone).slice(0, 12);
+  if (!noPhone.length) return;
+  const PHONE_RE = /(?:\+91[-\s]?|0)?[6-9]\d{9}/g;
+  await Promise.allSettled(noPhone.map(async h => {
+    try {
+      const res = await fetch(SERPER_SEARCH_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-API-KEY': key },
-        body: JSON.stringify({ q: `${h.name} hotel exterior`, num: 3, gl: 'in', hl: 'en' }),
+        body: JSON.stringify({ q: `"${h.name}" ${city} hotel phone number contact`, num: 3, gl: 'in', hl: 'en' }),
         signal: AbortSignal.timeout(6000),
       });
       const data = await res.json();
-      const imgs = (data.images || []).filter(i => i.imageUrl && /\.(jpg|jpeg|png|webp)/i.test(i.imageUrl));
-      if (imgs.length) h.imageUrl = imgs[0].imageUrl;
+      // Try knowledge graph first (most reliable)
+      const kgPhone = data.knowledgeGraph?.attributes?.Phone || data.knowledgeGraph?.phone;
+      if (kgPhone) { h.phone = kgPhone.trim(); return; }
+      // Scan organic result snippets
+      const text = (data.organic || []).slice(0, 3).map(r => (r.snippet || '')).join(' ');
+      const matches = text.match(PHONE_RE);
+      if (matches && matches[0]) h.phone = matches[0];
     } catch { /* ignore */ }
   }));
 }
@@ -129,10 +168,10 @@ function classifyPrice(name, stayType, hint) {
   return 'mid';
 }
 function priceLbl(level, type) {
-  if (type  === 'hostel')   return 'Under ₹700/bed';
-  if (level === 'budget')   return 'Under ₹1,500';
-  if (level === 'luxury')   return '₹5,000+';
-  return '₹1,500–₹4,000';
+  if (type  === 'hostel')   return '₹400 – ₹900 / bed';
+  if (level === 'budget')   return '₹800 – ₹2,500 / night';
+  if (level === 'luxury')   return '₹6,000 – ₹25,000 / night';
+  return '₹2,500 – ₹6,000 / night';
 }
 function detect24h(name, cats, oh) {
   const s = (name + ' ' + (cats||[]).join(' ') + ' ' + (oh||'')).toLowerCase();
@@ -215,8 +254,10 @@ async function fetchAll(dest) {
   }
   console.log(`🏨 [RECS] ${hotels.length} stays`);
 
-  // Fill missing images via Serper Images, then upload all to IK
+  // Fill missing images via Serper Images (up to 5 per hotel)
   await fetchHotelImages(hotels);
+  // Supplement missing phone numbers via web search
+  await fetchMissingPhones(hotels, city);
 
   // Upload hotel images to IK
   if (ikEnabled()) {
@@ -293,7 +334,8 @@ router.get('/recommendations', async (req, res) => {
         if (cached && !cacheErr) {
           const age       = Date.now() - new Date(cached.updated_at).getTime();
           const hospCount = (cached.data?.hospitals || []).length;
-          if (age < CACHE_MAX_AGE_MS && hospCount > 0) {
+          const hasImages = (cached.data?.hotels || []).some(h => Array.isArray(h.images) && h.images.length > 0);
+          if (age < CACHE_MAX_AGE_MS && hospCount > 0 && hasImages) {
             console.log(`⚡ [RECS] Cache hit "${dest}": ${cached.data.hotels?.length}H ${hospCount}Hosp ${cached.data.rentals?.length}R`);
             return res.json({ ...cached.data, destination: dest, fromCache: true, cachedAt: cached.updated_at });
           }
