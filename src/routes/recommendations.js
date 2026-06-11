@@ -290,12 +290,31 @@ async function fetchAll(dest) {
   // Supplement missing phone numbers via web search
   await fetchMissingPhones(hotels, city);
 
-  // Upload hotel images to IK
+  // Upload ALL hotel images (cover + gallery) to IK so cached URLs are permanent
   if (ikEnabled()) {
+    // 1. Cover images
     const withImg = hotels.filter(h=>h.imageUrl).slice(0,30);
     const ikMap   = await batchIK(withImg.map(h=>({name:h.name,dest,imageUrl:h.imageUrl})));
     for (const h of hotels) { if (ikMap.has(h.name)) h.imageUrl = ikMap.get(h.name); }
-    console.log(`📸 [RECS] IK done for ${withImg.length} hotel images`);
+    // 2. Gallery images[] — upload each slot to IK so they never expire
+    const galleryItems = [];
+    for (const h of hotels.slice(0, 20)) {
+      for (let idx = 0; idx < (h.images || []).length; idx++) {
+        if (h.images[idx]) galleryItems.push({ hotel: h, idx, url: h.images[idx] });
+      }
+    }
+    await Promise.allSettled(galleryItems.map(async ({ hotel, idx, url }) => {
+      try {
+        const fname = ikFilename(`${hotel.name}_g${idx}`, dest);
+        const ikUrl = await uploadToIK(url, fname);
+        if (ikUrl) hotel.images[idx] = ikUrl;
+      } catch { /* ignore */ }
+    }));
+    // Sync cover from gallery[0] if it was updated
+    for (const h of hotels) {
+      if (Array.isArray(h.images) && h.images[0] && !h.imageUrl) h.imageUrl = h.images[0];
+    }
+    console.log(`📸 [RECS] IK done: covers + ${galleryItems.length} gallery slots`);
   }
 
   // Hospitals
@@ -365,8 +384,8 @@ router.get('/recommendations', async (req, res) => {
         if (cached && !cacheErr) {
           const age       = Date.now() - new Date(cached.updated_at).getTime();
           const hospCount = (cached.data?.hospitals || []).length;
-          const hasImages = (cached.data?.hotels || []).some(h => Array.isArray(h.images) && h.images.length >= 3);
-          if (age < CACHE_MAX_AGE_MS && hospCount > 0 && hasImages) {
+          const hotelsCount = (cached.data?.hotels || []).length;
+          if (age < CACHE_MAX_AGE_MS && hospCount > 0 && hotelsCount > 0) {
             console.log(`⚡ [RECS] Cache hit "${dest}": ${cached.data.hotels?.length}H ${hospCount}Hosp ${cached.data.rentals?.length}R`);
             return res.json({ ...cached.data, destination: dest, fromCache: true, cachedAt: cached.updated_at });
           }
