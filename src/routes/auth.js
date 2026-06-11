@@ -151,19 +151,24 @@ router.post('/verify-otp', async (req, res) => {
   if (entry.code !== String(code).trim()) {
     return res.status(400).json({ error: 'Incorrect code. Please check your email and try again.' });
   }
-  otpStore.delete(email.toLowerCase());
 
   try {
     let user = await db.user.findUnique({ where: { email: email.toLowerCase() } });
     if (!user) {
-      // New user — create account (name is required for new users)
+      // New user — need a name to create account
       const displayName = (name || entry.name || '').trim();
       if (!displayName) {
+        // Don't delete the OTP yet — user still needs to come back with their name
         return res.status(400).json({ error: 'Please provide your name to create an account.', needsName: true });
       }
+      // We have the name — consume OTP and create user
+      otpStore.delete(email.toLowerCase());
       user = await db.user.create({
         data: { name: displayName, email: email.toLowerCase(), password: '' },
       });
+    } else {
+      // Existing user — consume OTP
+      otpStore.delete(email.toLowerCase());
     }
     const token = jwt.sign(
       { userId: user.id, name: user.name },
