@@ -24,47 +24,97 @@ function generateOtp() {
   return String(Math.floor(100000 + Math.random() * 900000));
 }
 
+const OTP_EMAIL_HTML = (code) => `
+  <div style="font-family:sans-serif;max-width:420px;margin:0 auto;padding:0;background:#0a2218;border-radius:20px;overflow:hidden">
+    <div style="background:linear-gradient(135deg,#1D9E75,#0A5C42);padding:32px 24px 24px;text-align:center">
+      <div style="font-size:30px;font-weight:800;color:#fff;letter-spacing:-0.5px">trip<span style="color:#F4A94E">bae</span></div>
+      <div style="font-size:12px;color:rgba(255,255,255,0.6);margin-top:4px;letter-spacing:2px;text-transform:uppercase">Plan · Split · Explore</div>
+    </div>
+    <div style="padding:32px 24px">
+      <div style="font-size:15px;color:rgba(255,255,255,0.7);margin-bottom:24px;line-height:1.6">
+        Here's your one-time sign-in code. It expires in <strong style="color:#fff">10 minutes</strong>.
+      </div>
+      <div style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);border-radius:14px;padding:28px 20px;text-align:center;margin-bottom:24px">
+        <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-bottom:10px;letter-spacing:2px;text-transform:uppercase">Your login code</div>
+        <div style="font-size:48px;font-weight:900;letter-spacing:12px;color:#fff;font-family:monospace">${code}</div>
+      </div>
+      <div style="font-size:12px;color:rgba(255,255,255,0.3);text-align:center">If you didn't request this, you can safely ignore this email.</div>
+    </div>
+  </div>
+`;
+
+// Send via Resend API (https://resend.com — free tier, no domain needed for testing)
+function sendViaResend(toEmail, code, apiKey) {
+  return new Promise((resolve) => {
+    const body = JSON.stringify({
+      from: 'TripBae <onboarding@resend.dev>',
+      to: [toEmail],
+      subject: `${code} — Your TripBae login code`,
+      html: OTP_EMAIL_HTML(code),
+    });
+    const options = {
+      hostname: 'api.resend.com',
+      path: '/emails',
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+      },
+    };
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          console.log(`[OTP] Sent via Resend to ${toEmail}`);
+        } else {
+          console.error('[OTP] Resend error:', res.statusCode, data);
+        }
+        resolve();
+      });
+    });
+    req.on('error', (e) => { console.error('[OTP] Resend request error:', e.message); resolve(); });
+    req.write(body);
+    req.end();
+  });
+}
+
 async function sendOtpEmail(toEmail, code) {
-  const FROM = process.env.OTP_FROM_EMAIL || 'akshitu10@gmail.com';
+  const RESEND_API_KEY = process.env.RESEND_API_KEY;
   const SMTP_USER = process.env.SMTP_USER;
   const SMTP_PASS = process.env.SMTP_PASS;
+  const FROM = process.env.OTP_FROM_EMAIL || 'akshitu10@gmail.com';
 
-  // If Nodemailer / SMTP is not configured, log to console (dev mode)
-  if (!SMTP_USER || !SMTP_PASS) {
-    console.log(`[OTP] To: ${toEmail} | Code: ${code} (no SMTP configured — use this code for testing)`);
-    return;
+  // 1. Try Resend if configured (recommended — free, no domain setup needed)
+  if (RESEND_API_KEY) {
+    return sendViaResend(toEmail, code, RESEND_API_KEY);
   }
 
-  // Lazy-load nodemailer only when it exists
-  try {
-    const nodemailer = require('nodemailer');
-    const transporter = nodemailer.createTransport({
-      service: 'gmail',
-      auth: { user: SMTP_USER, pass: SMTP_PASS },
-    });
-    await transporter.sendMail({
-      from: `TripBae <${FROM}>`,
-      to: toEmail,
-      subject: `${code} — Your TripBae login code`,
-      html: `
-        <div style="font-family:sans-serif;max-width:420px;margin:0 auto;padding:32px 24px;background:#fff;border-radius:16px;border:1px solid #eee">
-          <div style="text-align:center;margin-bottom:24px">
-            <div style="font-size:28px;font-weight:800;color:#1C1410">Trip<span style="color:#FF6B35">bae</span></div>
-            <div style="font-size:13px;color:#8A7E76;margin-top:4px">Plan. Split. Explore. Together.</div>
-          </div>
-          <div style="background:#F9F7F4;border-radius:12px;padding:24px;text-align:center;margin-bottom:20px">
-            <div style="font-size:13px;color:#8A7E76;margin-bottom:12px">Your login code</div>
-            <div style="font-size:44px;font-weight:800;letter-spacing:10px;color:#1C1410">${code}</div>
-            <div style="font-size:12px;color:#8A7E76;margin-top:12px">Expires in 10 minutes</div>
-          </div>
-          <div style="font-size:12px;color:#aaa;text-align:center">If you didn't request this, ignore this email.</div>
-        </div>
-      `,
-    });
-  } catch (e) {
-    console.error('[OTP] Email send failed:', e.message);
-    // Don't throw — caller handles the response
+  // 2. Try SMTP/Gmail if configured
+  if (SMTP_USER && SMTP_PASS) {
+    try {
+      const nodemailer = require('nodemailer');
+      const transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: { user: SMTP_USER, pass: SMTP_PASS },
+      });
+      await transporter.sendMail({
+        from: `TripBae <${FROM}>`,
+        to: toEmail,
+        subject: `${code} — Your TripBae login code`,
+        html: OTP_EMAIL_HTML(code),
+      });
+      console.log(`[OTP] Sent via SMTP to ${toEmail}`);
+      return;
+    } catch (e) {
+      console.error('[OTP] SMTP send failed:', e.message);
+    }
   }
+
+  // 3. Fallback: log to console (set RESEND_API_KEY in Render env vars to fix this)
+  console.warn(`[OTP] ⚠ No email provider configured. To: ${toEmail} | Code: ${code}`);
+  console.warn('[OTP] Add RESEND_API_KEY to your Render environment variables (free at resend.com)');
 }
 
 // ── SEND OTP ─────────────────────────────────────────────
