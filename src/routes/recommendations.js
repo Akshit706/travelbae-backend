@@ -70,9 +70,10 @@ async function batchIK(items, limit = 5) {
   return map;
 }
 
-// ─── Fetch hotel images via Serper Images (up to 5 per hotel) ───────
-// Fetches for ALL hotels (cover + gallery), stored as h.images[].
-// Runs in parallel batches for up to 20 hotels.
+// ─── Fetch hotel images via Serper Images — 5 specific categories ────
+// One query per slot: exterior, room, lobby, pool/amenity, dining/restaurant.
+// Takes the BEST single result from each query → 5 distinct real photos.
+// Runs in parallel for top 20 hotels.
 async function fetchHotelImages(hotels) {
   const SERPER_IMAGES_URL = 'https://google.serper.dev/images';
   const key = process.env.SERPER_PHOTOS_API_KEY || serperKey();
@@ -80,53 +81,83 @@ async function fetchHotelImages(hotels) {
   const toFetch = hotels.slice(0, 20);
   await Promise.allSettled(toFetch.map(async h => {
     try {
-      const queries = [
-        `${h.name} hotel exterior`,
-        `${h.name} hotel room interior`,
+      const name = h.name;
+      // 5 category-specific queries — one photo slot each
+      const categoryQueries = [
+        `${name} hotel exterior outside building`,
+        `${name} hotel room bed interior`,
+        `${name} hotel lobby reception`,
+        `${name} hotel swimming pool amenities`,
+        `${name} hotel restaurant dining`,
       ];
+      // Fire all 5 in parallel for speed
+      const results = await Promise.allSettled(
+        categoryQueries.map(q =>
+          fetch(SERPER_IMAGES_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-API-KEY': key },
+            body: JSON.stringify({ q, num: 3, gl: 'in', hl: 'en' }),
+            signal: AbortSignal.timeout(8000),
+          }).then(r => r.json())
+        )
+      );
       const imgs = [];
-      for (const q of queries) {
-        if (imgs.length >= 5) break;
-        const res = await fetch(SERPER_IMAGES_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-API-KEY': key },
-          body: JSON.stringify({ q, num: 5, gl: 'in', hl: 'en' }),
-          signal: AbortSignal.timeout(7000),
-        });
-        const data = await res.json();
-        const valid = (data.images || [])
-          .filter(i => i.imageUrl && /\.(jpg|jpeg|png|webp)/i.test(i.imageUrl))
-          .map(i => i.imageUrl);
-        imgs.push(...valid);
+      for (const r of results) {
+        if (r.status !== 'fulfilled') { imgs.push(null); continue; }
+        const valid = (r.value.images || [])
+          .filter(i => i.imageUrl && /\.(jpg|jpeg|png|webp)/i.test(i.imageUrl));
+        imgs.push(valid.length ? valid[0].imageUrl : null);
       }
-      h.images = [...new Set(imgs)].slice(0, 5);
+      // Remove nulls, deduplicate, keep up to 5
+      h.images = [...new Set(imgs.filter(Boolean))].slice(0, 5);
       if (!h.imageUrl && h.images.length) h.imageUrl = h.images[0];
     } catch { /* ignore */ }
   }));
 }
 
-// ─── Supplement missing phone numbers via Serper web search ──────────
+// ─── Supplement missing phone numbers — 3-source cascade ─────────────
+// 1. Serper Places (most reliable — structured business data)
+// 2. Serper web Knowledge Graph (Google Business Profile)
+// 3. Regex scan over organic result snippets
 async function fetchMissingPhones(hotels, city) {
+  const SERPER_PLACES_URL = 'https://google.serper.dev/places';
   const SERPER_SEARCH_URL = 'https://google.serper.dev/search';
   const key = serperKey();
   if (!key) return;
-  const noPhone = hotels.filter(h => !h.phone).slice(0, 12);
+  const noPhone = hotels.filter(h => !h.phone).slice(0, 15);
   if (!noPhone.length) return;
   const PHONE_RE = /(?:\+91[-\s]?|0)?[6-9]\d{9}/g;
   await Promise.allSettled(noPhone.map(async h => {
     try {
-      const res = await fetch(SERPER_SEARCH_URL, {
+      // ── Source 1: Serper Places (phoneNumber field) ──
+      const placesRes = await fetch(SERPER_PLACES_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-API-KEY': key },
-        body: JSON.stringify({ q: `"${h.name}" ${city} hotel phone number contact`, num: 3, gl: 'in', hl: 'en' }),
+        body: JSON.stringify({ q: `${h.name} ${city}`, gl: 'in', hl: 'en' }),
         signal: AbortSignal.timeout(6000),
       });
-      const data = await res.json();
-      // Try knowledge graph first (most reliable)
-      const kgPhone = data.knowledgeGraph?.attributes?.Phone || data.knowledgeGraph?.phone;
+      const placesData = await placesRes.json();
+      const match = (placesData.places || []).find(p =>
+        p.title && p.title.toLowerCase().includes(h.name.toLowerCase().split(' ').slice(0, 2).join(' ').toLowerCase())
+      );
+      if (match?.phoneNumber) { h.phone = match.phoneNumber.trim(); return; }
+
+      // ── Source 2: Serper web Knowledge Graph ──
+      const searchRes = await fetch(SERPER_SEARCH_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-API-KEY': key },
+        body: JSON.stringify({ q: `${h.name} ${city} hotel`, num: 3, gl: 'in', hl: 'en' }),
+        signal: AbortSignal.timeout(6000),
+      });
+      const searchData = await searchRes.json();
+      const kgPhone = searchData.knowledgeGraph?.attributes?.Phone
+        || searchData.knowledgeGraph?.phone
+        || searchData.knowledgeGraph?.contact?.phone;
       if (kgPhone) { h.phone = kgPhone.trim(); return; }
-      // Scan organic result snippets
-      const text = (data.organic || []).slice(0, 3).map(r => (r.snippet || '')).join(' ');
+
+      // ── Source 3: Regex scan on organic snippets ──
+      const text = (searchData.organic || []).slice(0, 4)
+        .map(r => `${r.snippet || ''} ${r.title || ''}`).join(' ');
       const matches = text.match(PHONE_RE);
       if (matches && matches[0]) h.phone = matches[0];
     } catch { /* ignore */ }
@@ -334,7 +365,7 @@ router.get('/recommendations', async (req, res) => {
         if (cached && !cacheErr) {
           const age       = Date.now() - new Date(cached.updated_at).getTime();
           const hospCount = (cached.data?.hospitals || []).length;
-          const hasImages = (cached.data?.hotels || []).some(h => Array.isArray(h.images) && h.images.length > 0);
+          const hasImages = (cached.data?.hotels || []).some(h => Array.isArray(h.images) && h.images.length >= 3);
           if (age < CACHE_MAX_AGE_MS && hospCount > 0 && hasImages) {
             console.log(`⚡ [RECS] Cache hit "${dest}": ${cached.data.hotels?.length}H ${hospCount}Hosp ${cached.data.rentals?.length}R`);
             return res.json({ ...cached.data, destination: dest, fromCache: true, cachedAt: cached.updated_at });
